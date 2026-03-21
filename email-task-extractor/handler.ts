@@ -292,8 +292,8 @@ function parseImapFetchResult(raw: string): EmailPayload | null {
     const dateMatch = raw.match(/^Date:\s*(.+)$/im);
     const messageIdMatch = raw.match(/^Message-ID:\s*(.+)$/im);
 
-    const from = fromMatch?.[1]?.trim() ?? "";
-    const subject = subjectMatch?.[1]?.trim() ?? "";
+    const from = decodeMimeHeader(fromMatch?.[1]?.trim() ?? "");
+    const subject = decodeMimeHeader(subjectMatch?.[1]?.trim() ?? "");
     if (!from || !subject) return null;
 
     const bodyParts = raw.split(/\r?\n\r?\n/);
@@ -317,6 +317,111 @@ function saveLastCheckTime(): void {
   const dir = path.dirname(LAST_CHECK_PATH);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(LAST_CHECK_PATH, new Date().toISOString(), "utf-8");
+}
+
+// ─── MIME Decoding ───────────────────────────────────────────────────────────
+
+function decodeMimeHeader(raw: string): string {
+  // Decode =?UTF-8?Q?...?= and =?UTF-8?B?...?= encoded headers
+  return raw.replace(
+    /=\?([^?]+)\?(Q|B)\?([^?]*)\?=/gi,
+    (_match, _charset: string, encoding: string, encoded: string) => {
+      if (encoding.toUpperCase() === "B") {
+        return Buffer.from(encoded, "base64").toString("utf-8");
+      }
+      // Q encoding: underscores → spaces, =XX → hex byte
+      return encoded
+        .replace(/_/g, " ")
+        .replace(/=([0-9A-Fa-f]{2})/g, (_m: string, hex: string) =>
+          String.fromCharCode(parseInt(hex, 16))
+        );
+    }
+  );
+}
+
+// ─── CSV-level Dedup ─────────────────────────────────────────────────────────
+
+const PRIORITY_RANK: Record<string, number> = {
+  Critical: 4,
+  High: 3,
+  Medium: 2,
+  Low: 1,
+  Junk: 0,
+};
+
+interface CsvTaskEntry {
+  lineIndex: number;       // line index in the file (0-based, after header)
+  priority: string;
+  due: string;
+}
+
+function loadExistingCsvTaskMap(): Map<string, CsvTaskEntry> {
+  const map = new Map<string, CsvTaskEntry>();
+  try {
+    if (!fs.existsSync(EMAIL_CSV_PATH)) return map;
+    const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
+    const lines = content.split("\n").slice(1); // skip header
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) continue;
+      const fields = parseCsvLine(line);
+      if (fields.length >= 7) {
+        const subject = fields[3].toLowerCase().replace(/[^a-z0-9]/g, "");
+        const task = fields[6].toLowerCase().replace(/[^a-z0-9]/g, "");
+        const key = `${subject}|${task}`;
+        map.set(key, {
+          lineIndex: i,
+          priority: fields[4],
+          due: fields[7] ?? "",
+        });
+      }
+    }
+  } catch { /* fresh start */ }
+  return map;
+}
+
+function updateCsvLine(lineIndex: number, newPriority: string, newDue: string, newDate: string): void {
+  const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
+  const allLines = content.split("\n");
+  // lineIndex is 0-based after header, so actual line is lineIndex + 1
+  const actualIdx = lineIndex + 1;
+  if (actualIdx >= allLines.length) return;
+
+  const fields = parseCsvLine(allLines[actualIdx]);
+  if (fields.length < 10) return;
+
+  // Update date, priority, and due
+  fields[0] = newDate;
+  fields[4] = newPriority;
+  if (newDue) fields[7] = newDue;
+
+  // Rebuild the line — re-quote fields that were originally quoted
+  allLines[actualIdx] = fields.map((f, i) => {
+    // Fields 1,2,3,6 are always quoted in our format
+    if ([1, 2, 3, 6].includes(i) && !f.startsWith('"')) return `"${f}"`;
+    return f;
+  }).join(",");
+
+  fs.writeFileSync(EMAIL_CSV_PATH, allLines.join("\n"), "utf-8");
+}
+
+function parseCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (ch === "," && !inQuotes) {
+      fields.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -365,13 +470,18 @@ function csvEscape(val: string): string {
 
 function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   ensureCsvHeader();
+  const existingTasks = loadExistingCsvTaskMap();
   const date = new Date().toISOString().slice(0, 10);
   const from = csvEscape(email.from);
   const company = csvEscape(extractDomain(email.from));
   const subject = csvEscape(email.subject);
+  const subjectNorm = email.subject.toLowerCase().replace(/[^a-z0-9]/g, "");
 
   if (analysis.tasks.length === 0) {
-    // Still log the email even if no tasks
+    const summaryNorm = analysis.summary.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const dedupKey = `${subjectNorm}|${summaryNorm}`;
+    if (existingTasks.has(dedupKey)) return;
+
     const row = [
       date, from, company, subject,
       analysis.priorityLabel, analysis.category,
@@ -382,6 +492,26 @@ function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   }
 
   for (const task of analysis.tasks) {
+    const taskNorm = task.title.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const dedupKey = `${subjectNorm}|${taskNorm}`;
+    const existing = existingTasks.get(dedupKey);
+
+    if (existing) {
+      // Repeat/reminder email: escalate priority and update due if more urgent
+      const newRank = PRIORITY_RANK[analysis.priorityLabel] ?? 0;
+      const oldRank = PRIORITY_RANK[existing.priority] ?? 0;
+      const escalatedPriority = newRank >= oldRank ? analysis.priorityLabel : existing.priority;
+      // Bump at least one level if same priority on repeat
+      const finalPriority = newRank === oldRank && oldRank < 4
+        ? (Object.entries(PRIORITY_RANK).find(([, v]) => v === oldRank + 1)?.[0] ?? escalatedPriority)
+        : escalatedPriority;
+      const newDue = task.due || existing.due;
+      updateCsvLine(existing.lineIndex, finalPriority, newDue, date);
+      continue;
+    }
+
+    existingTasks.set(dedupKey, { lineIndex: -1, priority: analysis.priorityLabel, due: task.due });
+
     const row = [
       date, from, company, subject,
       analysis.priorityLabel, analysis.category,
@@ -558,6 +688,11 @@ export const _testExports = {
   loadProcessedIds,
   saveProcessedIds,
   analyzeEmail,
+  decodeMimeHeader,
+  loadExistingCsvTaskMap,
+  updateCsvLine,
+  parseCsvLine,
+  PRIORITY_RANK,
   INTERNAL_DOMAINS,
   EMAIL_CSV_PATH,
   PROCESSED_IDS_PATH,

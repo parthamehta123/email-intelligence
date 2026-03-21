@@ -73,3 +73,5 @@ openclaw gateway restart
 - Tasks written to `~/Documents/email-tasks.csv`
 - Morning briefing at 8:30 AM weekdays
 - Say "check emails" or "email tasks" anytime
+- Duplicate/reminder emails auto-escalate existing tasks instead of creating new rows
+- MIME-encoded subjects (UTF-8) are decoded automatically

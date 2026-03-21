@@ -181,6 +181,21 @@ Restart the gateway: `openclaw gateway restart`
 
 ---
 
+## Deduplication
+
+Three layers prevent duplicate tasks:
+
+1. **IMAP-level** — tracks processed Message-IDs across polls (persisted in `~/.openclaw/state/gmail-processed-ids.json`, capped at 10,000)
+2. **MIME decoding** — `=?UTF-8?Q?...?=` and `=?UTF-8?B?...?=` encoded subjects are decoded before any dedup key is computed, so the same email always produces the same key regardless of encoding
+3. **CSV-level** — before writing, checks existing tasks by normalized `subject + task title`. If a match exists:
+   - **No duplicate row** is created
+   - **Priority auto-escalates** one level (e.g. High → Critical) — a repeat means urgency increased
+   - **Date and due date refresh** so the task resurfaces in the next briefing
+
+This means reminder/follow-up emails about the same thing won't bloat the CSV — they'll escalate the existing task instead.
+
+---
+
 ## Guardrails
 
 - External emails: tasks only, no drafts ever (clients hate AI slop)
