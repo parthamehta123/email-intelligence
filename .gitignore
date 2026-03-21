@@ -1,0 +1,7 @@
+.env
+node_modules/
+dist/
+
+# Sensitive config with API keys and passwords
+openclaw.json
+*.credentials*
