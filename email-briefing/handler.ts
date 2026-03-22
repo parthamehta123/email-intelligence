@@ -15,7 +15,8 @@ const MODEL = "claude-haiku-4-5-20251001";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface CsvRow {
-  date: string;
+  emailDate: string;
+  processedDate: string;
   from: string;
   company: string;
   subject: string;
@@ -73,18 +74,19 @@ function parseCsv(content: string): CsvRow[] {
       fields.push(current.trim());
 
       return {
-        date: fields[0] ?? "",
-        from: fields[1] ?? "",
-        company: fields[2] ?? "",
-        subject: fields[3] ?? "",
-        priority: fields[4] ?? "",
-        category: fields[5] ?? "",
-        emailType: fields[6] ?? "",
-        task: fields[7] ?? "",
-        due: fields[8] ?? "",
-        suggestedAction: fields[9] ?? "",
-        status: fields[10] ?? "",
-        threadId: fields[11] ?? "",
+        emailDate: fields[0] ?? "",
+        processedDate: fields[1] ?? "",
+        from: fields[2] ?? "",
+        company: fields[3] ?? "",
+        subject: fields[4] ?? "",
+        priority: fields[5] ?? "",
+        category: fields[6] ?? "",
+        emailType: fields[7] ?? "",
+        task: fields[8] ?? "",
+        due: fields[9] ?? "",
+        suggestedAction: fields[10] ?? "",
+        status: fields[11] ?? "",
+        threadId: fields[12] ?? "",
       };
     });
 }
@@ -93,7 +95,7 @@ function getLast24HoursRows(rows: CsvRow[]): CsvRow[] {
   const cutoff = new Date();
   cutoff.setHours(cutoff.getHours() - 24);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
-  return rows.filter((r) => r.date >= cutoffStr && r.status === "Pending");
+  return rows.filter((r) => r.processedDate >= cutoffStr && r.status === "Pending");
 }
 
 async function generateBriefingSummary(rows: CsvRow[], apiKey: string): Promise<string> {

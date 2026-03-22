@@ -435,7 +435,7 @@ function extractDomain(from: string): string {
   return match ? match[1].trim() : "unknown";
 }
 
-const CSV_HEADER = "Date,From,Company,Subject,Priority,Category,EmailType,Task,Due,SuggestedAction,Status,ThreadId\n";
+const CSV_HEADER = "EmailDate,ProcessedDate,From,Company,Subject,Priority,Category,EmailType,Task,Due,SuggestedAction,Status,ThreadId\n";
 
 function ensureCsvHeader(): void {
   if (!fs.existsSync(EMAIL_CSV_PATH)) {
@@ -444,7 +444,7 @@ function ensureCsvHeader(): void {
     return;
   }
   const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
-  if (!content.trim() || !content.startsWith("Date,")) {
+  if (!content.trim() || !content.startsWith("EmailDate,")) {
     fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER + content, "utf-8");
   }
 }
@@ -476,9 +476,10 @@ function parseCsvLine(line: string): string[] {
 
 function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   ensureCsvHeader();
-  const date = email.date
+  const emailDate = email.date
     ? new Date(email.date).toISOString().slice(0, 10)
-    : new Date().toISOString().slice(0, 10);
+    : "";
+  const processedDate = new Date().toISOString().slice(0, 10);
   const from = csvEscape(email.from);
   const company = csvEscape(extractDomain(email.from));
   const subject = csvEscape(decodeMimeHeader(email.subject));
@@ -486,10 +487,10 @@ function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
 
   if (analysis.tasks.length === 0) {
     const row = [
-      date, from, company, subject,
+      emailDate, processedDate, from, company, subject,
       analysis.priorityLabel, analysis.category,
-      analysis.emailType,
-      csvEscape(analysis.summary), "", "",
+      csvEscape(analysis.emailType),
+      csvEscape(analysis.summary), csvEscape(""), csvEscape(""),
       "No action", threadId
     ].join(",");
     fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
@@ -498,12 +499,12 @@ function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
 
   for (const task of analysis.tasks) {
     const row = [
-      date, from, company, subject,
+      emailDate, processedDate, from, company, subject,
       analysis.priorityLabel, analysis.category,
-      analysis.emailType,
-      csvEscape(task.title), task.due,
-      task.suggestedAction ?? "",
-      "Pending", threadId
+      csvEscape(analysis.emailType),
+      csvEscape(task.title), csvEscape(task.due),
+      csvEscape(task.suggestedAction ?? ""),
+      csvEscape("Pending"), threadId
     ].join(",");
     fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
   }

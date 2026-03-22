@@ -250,6 +250,20 @@ describe("priorityEmoji", () => {
 // ─── UID State ──────────────────────────────────────────────────────────────
 
 describe("UID state persistence", () => {
+  let originalUidState: string | undefined;
+
+  beforeEach(() => {
+    if (fs.existsSync(UID_STATE_PATH)) {
+      originalUidState = fs.readFileSync(UID_STATE_PATH, "utf-8");
+    }
+  });
+
+  afterEach(() => {
+    if (originalUidState !== undefined) {
+      fs.writeFileSync(UID_STATE_PATH, originalUidState, "utf-8");
+    }
+  });
+
   it("loadUidState returns defaults when file does not exist", () => {
     const state = loadUidState();
     expect(state).toHaveProperty("uidValidity");
@@ -268,6 +282,20 @@ describe("UID state persistence", () => {
 // ─── Daily Rate Limit ────────────────────────────────────────────────────────
 
 describe("daily rate limit", () => {
+  let originalDailyCount: string | undefined;
+
+  beforeEach(() => {
+    if (fs.existsSync(DAILY_COUNT_PATH)) {
+      originalDailyCount = fs.readFileSync(DAILY_COUNT_PATH, "utf-8");
+    }
+  });
+
+  afterEach(() => {
+    if (originalDailyCount !== undefined) {
+      fs.writeFileSync(DAILY_COUNT_PATH, originalDailyCount, "utf-8");
+    }
+  });
+
   it("loadDailyCount returns today's date with 0 count on fresh start", () => {
     const state = loadDailyCount();
     expect(state.date).toBe(new Date().toISOString().slice(0, 10));
@@ -339,8 +367,10 @@ describe("appendTasksToCsv", () => {
 
     // Header + 2 task rows
     expect(lines.length).toBe(3);
-    expect(lines[0]).toContain("Date,From,Company,Subject,Priority,Category,EmailType,Task");
+    expect(lines[0]).toContain("EmailDate,ProcessedDate,From,Company,Subject,Priority,Category,EmailType,Task");
     expect(lines[0]).toContain("ThreadId");
+    // Verify EmailDate comes from the email's Date header
+    expect(lines[1]).toContain("2026-03-20");
     expect(lines[1]).toContain("High");
     expect(lines[1]).toContain("External");
     expect(lines[1]).toContain("contract-discussion");
@@ -534,7 +564,8 @@ describe("source code invariants", () => {
     expect(source).not.toContain("wordOverlap");
   });
 
-  it("CSV header includes EmailType and ThreadId", () => {
+  it("CSV header includes EmailDate, ProcessedDate, EmailType and ThreadId", () => {
+    expect(source).toContain("EmailDate,ProcessedDate");
     expect(source).toContain("EmailType");
     expect(source).toContain("ThreadId");
   });
