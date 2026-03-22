@@ -449,16 +449,15 @@ function ensureCsvHeader(): void {
     return;
   }
   const lines = content.split("\n");
-  const firstLine = lines[0];
-  if (firstLine.startsWith("EmailDate,ProcessedDate,")) {
-    return; // correct header already present
-  }
-  // Replace old header if present, otherwise prepend new header
-  if (firstLine.startsWith("Date,") || firstLine.startsWith("EmailDate,")) {
-    lines[0] = CSV_HEADER.trimEnd();
-    fs.writeFileSync(EMAIL_CSV_PATH, lines.join("\n"), "utf-8");
-  } else {
-    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER + content, "utf-8");
+  // Remove any lines that look like CSV headers (old or new format)
+  const isHeaderLine = (l: string) =>
+    l.startsWith("Date,From,") ||
+    l.startsWith("EmailDate,ProcessedDate,") ||
+    l.startsWith("EmailDate,From,");
+  const dataLines = lines.filter((l) => !isHeaderLine(l));
+  const cleaned = CSV_HEADER.trimEnd() + "\n" + dataLines.join("\n");
+  if (cleaned !== content) {
+    fs.writeFileSync(EMAIL_CSV_PATH, cleaned, "utf-8");
   }
 }
 
