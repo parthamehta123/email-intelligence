@@ -283,17 +283,26 @@ async function fetchNewEmails(envOverrides?: Record<string, string>): Promise<Em
   return emails;
 }
 
+function unfoldHeader(raw: string, headerName: string): string | undefined {
+  // RFC 2822: headers can be folded across lines with CRLF+whitespace
+  const regex = new RegExp(`^${headerName}:\\s*(.+(?:\\r?\\n[ \\t]+.+)*)`, "im");
+  const match = raw.match(regex);
+  if (!match) return undefined;
+  // Unfold by collapsing CRLF+whitespace into a single space
+  return match[1].replace(/\r?\n[ \t]+/g, " ").trim();
+}
+
 function parseImapFetchResult(raw: string): EmailPayload | null {
   try {
-    const fromMatch = raw.match(/^From:\s*(.+)$/im);
-    const toMatch = raw.match(/^To:\s*(.+)$/im);
-    const ccMatch = raw.match(/^CC:\s*(.+)$/im);
-    const subjectMatch = raw.match(/^Subject:\s*(.+)$/im);
+    const fromRaw = unfoldHeader(raw, "From");
+    const toRaw = unfoldHeader(raw, "To");
+    const ccRaw = unfoldHeader(raw, "CC");
+    const subjectRaw = unfoldHeader(raw, "Subject");
     const dateMatch = raw.match(/^Date:\s*(.+)$/im);
     const messageIdMatch = raw.match(/^Message-ID:\s*(.+)$/im);
 
-    const from = decodeMimeHeader(fromMatch?.[1]?.trim() ?? "");
-    const subject = decodeMimeHeader(subjectMatch?.[1]?.trim() ?? "");
+    const from = decodeMimeHeader(fromRaw ?? "");
+    const subject = decodeMimeHeader(subjectRaw ?? "");
     if (!from || !subject) return null;
 
     const bodyParts = raw.split(/\r?\n\r?\n/);
@@ -304,8 +313,8 @@ function parseImapFetchResult(raw: string): EmailPayload | null {
       subject,
       body: body.slice(0, 50000),
       date: dateMatch?.[1]?.trim(),
-      to: toMatch?.[1]?.trim(),
-      cc: ccMatch?.[1]?.trim(),
+      to: toRaw,
+      cc: ccRaw,
       messageId: messageIdMatch?.[1]?.trim(),
     };
   } catch {
@@ -355,6 +364,19 @@ interface CsvTaskEntry {
   due: string;
 }
 
+function extractWords(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2)
+  );
+}
+
+function wordOverlap(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let common = 0;
+  for (const w of a) if (b.has(w)) common++;
+  return common / Math.max(a.size, b.size);
+}
+
 function loadExistingCsvTaskMap(): Map<string, CsvTaskEntry> {
   const map = new Map<string, CsvTaskEntry>();
   try {
@@ -366,7 +388,7 @@ function loadExistingCsvTaskMap(): Map<string, CsvTaskEntry> {
       if (!line.trim()) continue;
       const fields = parseCsvLine(line);
       if (fields.length >= 7) {
-        const subject = fields[3].toLowerCase().replace(/[^a-z0-9]/g, "");
+        const subject = decodeMimeHeader(fields[3]).toLowerCase().replace(/[^a-z0-9]/g, "");
         const task = fields[6].toLowerCase().replace(/[^a-z0-9]/g, "");
         const key = `${subject}|${task}`;
         map.set(key, {
@@ -378,6 +400,25 @@ function loadExistingCsvTaskMap(): Map<string, CsvTaskEntry> {
     }
   } catch { /* fresh start */ }
   return map;
+}
+
+function findFuzzyMatch(
+  existingTasks: Map<string, CsvTaskEntry>,
+  subjectNorm: string,
+  taskTitle: string,
+): CsvTaskEntry | undefined {
+  const taskWords = extractWords(taskTitle);
+  for (const [key, entry] of existingTasks) {
+    const [existSubj, existTask] = key.split("|");
+    // Same subject (normalized) and high word overlap in task title
+    if (existSubj === subjectNorm) {
+      const existWords = extractWords(existTask);
+      if (wordOverlap(taskWords, existWords) >= 0.6) {
+        return entry;
+      }
+    }
+  }
+  return undefined;
 }
 
 function updateCsvLine(lineIndex: number, newPriority: string, newDue: string, newDate: string): void {
@@ -453,14 +494,18 @@ function extractDomain(from: string): string {
   return match ? match[1].trim() : "unknown";
 }
 
+const CSV_HEADER = "Date,From,Company,Subject,Priority,Category,Task,Due,SuggestedAction,Status\n";
+
 function ensureCsvHeader(): void {
   if (!fs.existsSync(EMAIL_CSV_PATH)) {
     fs.mkdirSync(path.dirname(EMAIL_CSV_PATH), { recursive: true });
-    fs.writeFileSync(
-      EMAIL_CSV_PATH,
-      "Date,From,Company,Subject,Priority,Category,Task,Due,SuggestedAction,Status\n",
-      "utf-8"
-    );
+    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER, "utf-8");
+    return;
+  }
+  // If file exists but is empty or missing header, add it
+  const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
+  if (!content.trim() || !content.startsWith("Date,")) {
+    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER + content, "utf-8");
   }
 }
 
@@ -474,13 +519,14 @@ function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   const date = new Date().toISOString().slice(0, 10);
   const from = csvEscape(email.from);
   const company = csvEscape(extractDomain(email.from));
-  const subject = csvEscape(email.subject);
-  const subjectNorm = email.subject.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const decodedSubject = decodeMimeHeader(email.subject);
+  const subject = csvEscape(decodedSubject);
+  const subjectNorm = decodedSubject.toLowerCase().replace(/[^a-z0-9]/g, "");
 
   if (analysis.tasks.length === 0) {
     const summaryNorm = analysis.summary.toLowerCase().replace(/[^a-z0-9]/g, "");
     const dedupKey = `${subjectNorm}|${summaryNorm}`;
-    if (existingTasks.has(dedupKey)) return;
+    if (existingTasks.has(dedupKey) || findFuzzyMatch(existingTasks, subjectNorm, analysis.summary)) return;
 
     const row = [
       date, from, company, subject,
@@ -494,7 +540,7 @@ function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   for (const task of analysis.tasks) {
     const taskNorm = task.title.toLowerCase().replace(/[^a-z0-9]/g, "");
     const dedupKey = `${subjectNorm}|${taskNorm}`;
-    const existing = existingTasks.get(dedupKey);
+    const existing = existingTasks.get(dedupKey) ?? findFuzzyMatch(existingTasks, subjectNorm, task.title);
 
     if (existing) {
       // Repeat/reminder email: escalate priority and update due if more urgent
