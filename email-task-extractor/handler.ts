@@ -444,7 +444,12 @@ function ensureCsvHeader(): void {
     return;
   }
   const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
-  if (!content.trim() || !content.startsWith("EmailDate,")) {
+  if (!content.trim()) {
+    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER, "utf-8");
+    return;
+  }
+  const firstLine = content.split("\n")[0];
+  if (!firstLine.startsWith("EmailDate,ProcessedDate,")) {
     fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER + content, "utf-8");
   }
 }
