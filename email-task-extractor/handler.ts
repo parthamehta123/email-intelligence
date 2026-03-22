@@ -35,8 +35,8 @@ interface EmailAnalysis {
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-haiku-4-5-20251001";
-const BATCH_SIZE = 11;
-const DAILY_LIMIT = 101;
+const BATCH_SIZE = 10;
+const DAILY_LIMIT = 100;
 
 const EMAIL_CSV_PATH = path.join(
   process.env.HOME ?? "~",

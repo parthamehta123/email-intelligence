@@ -310,12 +310,12 @@ describe("daily rate limit", () => {
     expect(state.count).toBe(42);
   });
 
-  it("BATCH_SIZE is 11", () => {
-    expect(BATCH_SIZE).toBe(11);
+  it("BATCH_SIZE is 10", () => {
+    expect(BATCH_SIZE).toBe(10);
   });
 
-  it("DAILY_LIMIT is 101", () => {
-    expect(DAILY_LIMIT).toBe(101);
+  it("DAILY_LIMIT is 100", () => {
+    expect(DAILY_LIMIT).toBe(100);
   });
 });
 
@@ -549,12 +549,12 @@ describe("source code invariants", () => {
     expect(source).not.toMatch(/body\.slice\(0,\s*5000\)/);
   });
 
-  it("batch size is 11", () => {
-    expect(source).toContain("BATCH_SIZE = 11");
+  it("batch size is 10", () => {
+    expect(source).toContain("BATCH_SIZE = 10");
   });
 
-  it("daily limit is 101", () => {
-    expect(source).toContain("DAILY_LIMIT = 101");
+  it("daily limit is 100", () => {
+    expect(source).toContain("DAILY_LIMIT = 100");
   });
 
   it("does not contain old dedup functions", () => {
