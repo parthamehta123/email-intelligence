@@ -15,15 +15,21 @@ const {
   appendTasksToCsv,
   ensureCsvHeader,
   priorityEmoji,
-  loadProcessedIds,
-  saveProcessedIds,
+  extractThreadId,
+  loadUidState,
+  saveUidState,
+  loadDailyCount,
+  saveDailyCount,
   EMAIL_CSV_PATH,
-  PROCESSED_IDS_PATH,
+  UID_STATE_PATH,
+  DAILY_COUNT_PATH,
+  BATCH_SIZE,
+  DAILY_LIMIT,
 } = _testExports;
 
 // ─── Test Data ───────────────────────────────────────────────────────────────
 
-const SAMPLE_IMAP_FETCH = `* 1 FETCH (BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)] {200}
+const SAMPLE_IMAP_FETCH = `* 1 FETCH (BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)] {200}
 From: John Smith <john@bigclient.com>
 To: partha@clarivate.com
 CC: team@clarivate.com
@@ -40,6 +46,20 @@ Thanks,
 John
 )
 F1 OK FETCH completed`;
+
+const SAMPLE_IMAP_THREAD = `* 2 FETCH (BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)] {200}
+From: Jane Doe <jane@bigclient.com>
+To: partha@clarivate.com
+Subject: Re: Contract renewal Q3
+Date: Tue, 21 Mar 2026 09:00:00 +0000
+Message-ID: <def456@bigclient.com>
+In-Reply-To: <abc123@bigclient.com>
+References: <abc123@bigclient.com>
+
+BODY[TEXT] {100}
+Following up on the renewal. Any update on the proposal?
+)
+F2 OK FETCH completed`;
 
 const SAMPLE_IMAP_NO_FROM = `* 1 FETCH (BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)] {50}
 Subject: No sender here
@@ -72,6 +92,14 @@ describe("parseImapFetchResult", () => {
     expect(result!.body).toContain("contract renewal");
   });
 
+  it("parses thread headers (In-Reply-To and References)", () => {
+    const result = parseImapFetchResult(SAMPLE_IMAP_THREAD);
+    expect(result).not.toBeNull();
+    expect(result!.inReplyTo).toBe("<abc123@bigclient.com>");
+    expect(result!.references).toBe("<abc123@bigclient.com>");
+    expect(result!.subject).toBe("Re: Contract renewal Q3");
+  });
+
   it("returns null when From is missing", () => {
     expect(parseImapFetchResult(SAMPLE_IMAP_NO_FROM)).toBeNull();
   });
@@ -97,6 +125,42 @@ F1 OK FETCH completed`;
     const result = parseImapFetchResult(raw);
     expect(result).not.toBeNull();
     expect(result!.body.length).toBeLessThanOrEqual(50000);
+  });
+});
+
+// ─── extractThreadId ────────────────────────────────────────────────────────
+
+describe("extractThreadId", () => {
+  it("uses first Reference as thread root", () => {
+    const email = {
+      from: "a@b.com", subject: "test", body: "",
+      messageId: "<own@b.com>",
+      references: "<root@b.com> <mid@b.com>",
+      inReplyTo: "<mid@b.com>",
+    };
+    expect(extractThreadId(email)).toBe("<root@b.com>");
+  });
+
+  it("falls back to In-Reply-To when no References", () => {
+    const email = {
+      from: "a@b.com", subject: "test", body: "",
+      messageId: "<own@b.com>",
+      inReplyTo: "<parent@b.com>",
+    };
+    expect(extractThreadId(email)).toBe("<parent@b.com>");
+  });
+
+  it("uses own Message-ID for standalone emails", () => {
+    const email = {
+      from: "a@b.com", subject: "test", body: "",
+      messageId: "<own@b.com>",
+    };
+    expect(extractThreadId(email)).toBe("<own@b.com>");
+  });
+
+  it("returns empty string when no IDs present", () => {
+    const email = { from: "a@b.com", subject: "test", body: "" };
+    expect(extractThreadId(email)).toBe("");
   });
 });
 
@@ -176,88 +240,95 @@ describe("priorityEmoji", () => {
     expect(priorityEmoji("High")).toBe("🟠");
     expect(priorityEmoji("Medium")).toBe("🟡");
     expect(priorityEmoji("Low")).toBe("🟢");
-    expect(priorityEmoji("Junk")).toBe("⚫");
+  });
+
+  it("returns fallback for unknown priority", () => {
+    expect(priorityEmoji("Unknown")).toBe("⚪");
   });
 });
 
-// ─── Dedup (loadProcessedIds / saveProcessedIds) ─────────────────────────────
+// ─── UID State ──────────────────────────────────────────────────────────────
 
-describe("dedup persistence", () => {
-  const tmpDir = path.join("/tmp", "email-intel-test-dedup");
-  const tmpFile = path.join(tmpDir, "ids.json");
-
-  beforeEach(() => {
-    fs.mkdirSync(tmpDir, { recursive: true });
+describe("UID state persistence", () => {
+  it("loadUidState returns defaults when file does not exist", () => {
+    const state = loadUidState();
+    expect(state).toHaveProperty("uidValidity");
+    expect(state).toHaveProperty("lastUid");
+    expect(typeof state.lastUid).toBe("number");
   });
 
-  afterEach(() => {
-    if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
-    if (fs.existsSync(tmpDir)) fs.rmdirSync(tmpDir);
-  });
-
-  it("loadProcessedIds returns empty set when file does not exist", () => {
-    // The actual function reads from PROCESSED_IDS_PATH which may or may not exist.
-    // We test that it returns a Set (not crash) regardless.
-    const ids = loadProcessedIds();
-    expect(ids).toBeInstanceOf(Set);
-  });
-
-  it("saveProcessedIds caps at 10000 entries", () => {
-    const largeSet = new Set<string>();
-    for (let i = 0; i < 12000; i++) {
-      largeSet.add(`msg-${i}`);
-    }
-    // Save to the real path, then read it back
-    saveProcessedIds(largeSet);
-    const data = JSON.parse(fs.readFileSync(PROCESSED_IDS_PATH, "utf-8"));
-    expect(data.ids.length).toBe(10000);
-    // Should keep the LAST 10000 (highest numbered)
-    expect(data.ids).toContain("msg-11999");
-    expect(data.ids).not.toContain("msg-0");
+  it("saveUidState and loadUidState round-trip correctly", () => {
+    saveUidState({ uidValidity: 12345, lastUid: 500 });
+    const state = loadUidState();
+    expect(state.uidValidity).toBe(12345);
+    expect(state.lastUid).toBe(500);
   });
 });
 
-// ─── CSV writing ─────────────────────────────────────────────────────────────
+// ─── Daily Rate Limit ────────────────────────────────────────────────────────
+
+describe("daily rate limit", () => {
+  it("loadDailyCount returns today's date with 0 count on fresh start", () => {
+    const state = loadDailyCount();
+    expect(state.date).toBe(new Date().toISOString().slice(0, 10));
+    expect(state.count).toBeGreaterThanOrEqual(0);
+  });
+
+  it("saveDailyCount and loadDailyCount round-trip correctly", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    saveDailyCount({ date: today, count: 42 });
+    const state = loadDailyCount();
+    expect(state.date).toBe(today);
+    expect(state.count).toBe(42);
+  });
+
+  it("BATCH_SIZE is 10", () => {
+    expect(BATCH_SIZE).toBe(10);
+  });
+
+  it("DAILY_LIMIT is 100", () => {
+    expect(DAILY_LIMIT).toBe(100);
+  });
+});
+
+// ─── CSV writing (no dedup) ─────────────────────────────────────────────────
 
 describe("appendTasksToCsv", () => {
-  const testCsvPath = EMAIL_CSV_PATH + ".test";
-  let originalPath: string;
+  let originalContent: string | undefined;
 
   beforeEach(() => {
-    // We can't easily swap the const, so we test via the real path
-    // Clean up any existing test CSV
     if (fs.existsSync(EMAIL_CSV_PATH)) {
-      originalPath = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
+      originalContent = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
     }
   });
 
   afterEach(() => {
-    // Restore original CSV if it existed
-    if (originalPath !== undefined) {
-      fs.writeFileSync(EMAIL_CSV_PATH, originalPath, "utf-8");
+    if (originalContent !== undefined) {
+      fs.writeFileSync(EMAIL_CSV_PATH, originalContent, "utf-8");
+    } else if (fs.existsSync(EMAIL_CSV_PATH)) {
+      fs.unlinkSync(EMAIL_CSV_PATH);
     }
   });
 
-  it("writes tasks with correct format", () => {
-    // Remove CSV to test fresh creation
-    if (fs.existsSync(EMAIL_CSV_PATH)) {
-      fs.unlinkSync(EMAIL_CSV_PATH);
-    }
+  it("writes tasks with correct format including EmailType and ThreadId", () => {
+    if (fs.existsSync(EMAIL_CSV_PATH)) fs.unlinkSync(EMAIL_CSV_PATH);
 
     const email = {
       from: "John <john@bigcorp.com>",
       subject: "Renewal discussion",
       body: "Please review",
+      date: "Mon, 20 Mar 2026 10:00:00 +0000",
+      messageId: "<msg1@bigcorp.com>",
     };
 
     const analysis = {
-      priorityScore: 5,
       priorityLabel: "High" as const,
       category: "External" as const,
-      summary: "Client wants renewal",
+      emailType: "contract-discussion",
+      summary: "Client requesting contract renewal review",
       tasks: [
-        { title: "Review renewal terms", due: "Friday", context: "Q3 renewal" },
-        { title: "Send pricing update", due: "ASAP", context: "Updated rates" },
+        { title: "Review renewal terms and prepare response", due: "Friday", context: "Q3 renewal" },
+        { title: "Update pricing sheet for client", due: "ASAP", context: "Updated rates needed" },
       ],
     };
 
@@ -268,30 +339,61 @@ describe("appendTasksToCsv", () => {
 
     // Header + 2 task rows
     expect(lines.length).toBe(3);
-    expect(lines[0]).toContain("Date,From,Company,Subject,Priority");
+    expect(lines[0]).toContain("Date,From,Company,Subject,Priority,Category,EmailType,Task");
+    expect(lines[0]).toContain("ThreadId");
     expect(lines[1]).toContain("High");
     expect(lines[1]).toContain("External");
+    expect(lines[1]).toContain("contract-discussion");
     expect(lines[1]).toContain("Review renewal terms");
     expect(lines[1]).toContain("Pending");
-    expect(lines[2]).toContain("Send pricing update");
+    expect(lines[2]).toContain("Update pricing sheet");
+  });
+
+  it("appends duplicate emails without dedup (every email gets a row)", () => {
+    if (fs.existsSync(EMAIL_CSV_PATH)) fs.unlinkSync(EMAIL_CSV_PATH);
+
+    const email = {
+      from: "John <john@bigcorp.com>",
+      subject: "Same email",
+      body: "Same content",
+      date: "Mon, 20 Mar 2026 10:00:00 +0000",
+      messageId: "<msg1@bigcorp.com>",
+    };
+
+    const analysis = {
+      priorityLabel: "High" as const,
+      category: "External" as const,
+      emailType: "follow-up",
+      summary: "Follow-up on previous discussion",
+      tasks: [{ title: "Respond to follow-up", due: "ASAP", context: "Client waiting" }],
+    };
+
+    // Append same email twice — both should appear
+    appendTasksToCsv(email, analysis);
+    appendTasksToCsv(email, analysis);
+
+    const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
+    const lines = content.trim().split("\n");
+
+    // Header + 2 rows (no dedup)
+    expect(lines.length).toBe(3);
   });
 
   it("logs email with no tasks as 'No action'", () => {
-    if (fs.existsSync(EMAIL_CSV_PATH)) {
-      fs.unlinkSync(EMAIL_CSV_PATH);
-    }
+    if (fs.existsSync(EMAIL_CSV_PATH)) fs.unlinkSync(EMAIL_CSV_PATH);
 
     const email = {
       from: "news@newsletter.com",
       subject: "Weekly update",
       body: "FYI only",
+      date: "Mon, 20 Mar 2026 10:00:00 +0000",
     };
 
     const analysis = {
-      priorityScore: -2,
       priorityLabel: "Low" as const,
       category: "External" as const,
-      summary: "Newsletter, no action needed",
+      emailType: "information-sharing",
+      summary: "Weekly newsletter, no action needed",
       tasks: [],
     };
 
@@ -299,6 +401,34 @@ describe("appendTasksToCsv", () => {
 
     const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
     expect(content).toContain("No action");
+    expect(content).toContain("information-sharing");
+  });
+
+  it("includes thread ID for threaded emails", () => {
+    if (fs.existsSync(EMAIL_CSV_PATH)) fs.unlinkSync(EMAIL_CSV_PATH);
+
+    const email = {
+      from: "Jane <jane@bigcorp.com>",
+      subject: "Re: Contract renewal",
+      body: "Following up",
+      date: "Tue, 21 Mar 2026 09:00:00 +0000",
+      messageId: "<reply1@bigcorp.com>",
+      inReplyTo: "<original@bigcorp.com>",
+      references: "<original@bigcorp.com>",
+    };
+
+    const analysis = {
+      priorityLabel: "High" as const,
+      category: "External" as const,
+      emailType: "follow-up",
+      summary: "Follow-up on contract renewal thread",
+      tasks: [{ title: "Review and respond to follow-up", due: "Today", context: "Client waiting" }],
+    };
+
+    appendTasksToCsv(email, analysis);
+
+    const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
+    expect(content).toContain("<original@bigcorp.com>");
   });
 });
 
@@ -316,7 +446,6 @@ describe("handler", () => {
       messages: [],
       context: {},
     };
-    // Should return without doing anything
     await handler(event as any);
     expect(event.messages.length).toBe(0);
   });
@@ -326,12 +455,10 @@ describe("handler", () => {
 
 describe("guardrail rules", () => {
   it("external emails have suggestedAction stripped", () => {
-    // This tests the logic in the handler loop (lines 507-511)
-    // We simulate what the handler does
     const analysis = {
-      priorityScore: 5,
       priorityLabel: "High" as const,
       category: "External" as const,
+      emailType: "contract-discussion",
       summary: "Client email",
       tasks: [
         { title: "Review contract", due: "Friday", context: "Q3", suggestedAction: "email-draft" },
@@ -339,7 +466,6 @@ describe("guardrail rules", () => {
       ],
     };
 
-    // Simulate the handler's enforcement
     if (analysis.category === "External") {
       for (const task of analysis.tasks) {
         task.suggestedAction = undefined;
@@ -353,12 +479,12 @@ describe("guardrail rules", () => {
   it("internal emails keep suggestedAction", () => {
     const analysis = {
       category: "Internal" as const,
+      emailType: "task-assignment",
       tasks: [
         { title: "Draft response", due: "Today", context: "Manager request", suggestedAction: "email-draft" },
       ],
     };
 
-    // Internal emails should NOT have suggestedAction stripped
     if (analysis.category === "External") {
       for (const task of analysis.tasks) {
         task.suggestedAction = undefined;
@@ -367,43 +493,58 @@ describe("guardrail rules", () => {
 
     expect(analysis.tasks[0].suggestedAction).toBe("email-draft");
   });
+
+  it("external emails always get High priority", () => {
+    const analysis = {
+      priorityLabel: "Low" as const,
+      category: "External" as const,
+    };
+
+    // Simulate handler enforcement
+    if (analysis.category === "External") {
+      (analysis as any).priorityLabel = "High";
+    }
+
+    expect(analysis.priorityLabel).toBe("High");
+  });
 });
 
-// ─── No per-poll limit ───────────────────────────────────────────────────────
+// ─── Source code verification ─────────────────────────────────────────────────
 
-describe("no artificial limits", () => {
-  it("handler source does not contain .slice(-50)", async () => {
-    const source = fs.readFileSync(
-      path.join(__dirname, "handler.ts"),
-      "utf-8"
-    );
-    expect(source).not.toContain(".slice(-50)");
-  });
+describe("source code invariants", () => {
+  const source = fs.readFileSync(path.join(__dirname, "handler.ts"), "utf-8");
 
-  it("handler source does not hard-code a 3-day search window", async () => {
-    const source = fs.readFileSync(
-      path.join(__dirname, "handler.ts"),
-      "utf-8"
-    );
-    // Should not have getDate() - 3 for date window
-    expect(source).not.toContain("getDate() - 3");
-  });
-
-  it("body limit is 50000 not 5000", async () => {
-    const source = fs.readFileSync(
-      path.join(__dirname, "handler.ts"),
-      "utf-8"
-    );
+  it("body limit is 50000 not 5000", () => {
     expect(source).toContain("body.slice(0, 50000)");
     expect(source).not.toMatch(/body\.slice\(0,\s*5000\)/);
   });
 
-  it("dedup cache is 10000 not 500", async () => {
-    const source = fs.readFileSync(
-      path.join(__dirname, "handler.ts"),
-      "utf-8"
-    );
-    expect(source).toContain(".slice(-10000)");
-    expect(source).not.toMatch(/\.slice\(-500\b\)/);
+  it("batch size is 10", () => {
+    expect(source).toContain("BATCH_SIZE = 10");
+  });
+
+  it("daily limit is 100", () => {
+    expect(source).toContain("DAILY_LIMIT = 100");
+  });
+
+  it("does not contain old dedup functions", () => {
+    expect(source).not.toContain("loadProcessedIds");
+    expect(source).not.toContain("saveProcessedIds");
+    expect(source).not.toContain("findFuzzyMatch");
+    expect(source).not.toContain("wordOverlap");
+  });
+
+  it("CSV header includes EmailType and ThreadId", () => {
+    expect(source).toContain("EmailType");
+    expect(source).toContain("ThreadId");
+  });
+
+  it("fetches In-Reply-To and References headers for thread detection", () => {
+    expect(source).toContain("IN-REPLY-TO");
+    expect(source).toContain("REFERENCES");
+  });
+
+  it("forces External emails to High priority", () => {
+    expect(source).toContain('analysis.priorityLabel = "High"; // Always High for external');
   });
 });

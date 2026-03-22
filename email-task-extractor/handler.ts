@@ -14,42 +14,46 @@ interface EmailPayload {
   to?: string;
   cc?: string;
   messageId?: string;
+  inReplyTo?: string;
+  references?: string;
 }
 
 interface EmailAnalysis {
-  priorityScore: number;
-  priorityLabel: "Critical" | "High" | "Medium" | "Low" | "Junk";
+  priorityLabel: "Critical" | "High" | "Medium" | "Low";
   category: "External" | "Internal";
+  emailType: string;
   summary: string;
   tasks: Array<{
     title: string;
     due: string;
     context: string;
-    suggestedAction?: string; // Internal only: draft, ppt, quote, proposal, contract, citation
+    suggestedAction?: string;
   }>;
-  skipReason?: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-haiku-4-5-20251001";
+const BATCH_SIZE = 10;
+const DAILY_LIMIT = 100;
+
 const EMAIL_CSV_PATH = path.join(
   process.env.HOME ?? "~",
   "Documents",
   "email-tasks.csv"
 );
-const PROCESSED_IDS_PATH = path.join(
+const UID_STATE_PATH = path.join(
   process.env.HOME ?? "~",
   ".openclaw",
   "state",
-  "gmail-processed-ids.json"
+  "gmail-uid-state.json"
 );
-const LAST_CHECK_PATH = path.join(
+const DAILY_COUNT_PATH = path.join(
   process.env.HOME ?? "~",
   ".openclaw",
   "state",
-  "gmail-last-check.txt"
+  "gmail-daily-count.json"
 );
 
 const IMAP_HOST = "imap.gmail.com";
@@ -81,45 +85,42 @@ CATEGORY:
 - "External": from outside Clarivate (clients, prospects, vendors, partners)
 - "Internal": from inside Clarivate (colleagues, managers, leadership)
 
-PRIORITY SCORING — add points:
-+2: From a client or named account contact
-+2: From manager or leadership
-+2: Contains contract, renewal, proposal, quote, commercial terms
-+2: Explicit action required
-+1: Contains a deadline or date
-+1: Thread unanswered / follow-up language
-+1: Contains "urgent", "ASAP", "critical", "escalation"
--3: Mass CC, newsletter, automated notification, marketing
--1: FYI only, no action needed
--2: Out of office, auto-reply, system notification
+PRIORITY RULES:
+- External emails: ALWAYS assign "High"
+- Internal emails: Default to "Medium". Raise to "High" or "Critical" only for clear urgency (deadline, escalation, executive request). Lower to "Low" only for pure FYI/no-action emails.
 
-JUNK (skip): marketing, newsletters, automated notifications, calendar invites, OOO replies.
+EMAIL TYPE — classify the email as one of:
+"meeting-request", "task-assignment", "follow-up", "status-update", "escalation", "approval-request", "information-sharing", "introduction", "feedback-request", "contract-discussion", "proposal-request", "invoice-billing", "technical-issue", "newsletter", "auto-reply", "calendar-invite", "other"
+
+SUMMARIZATION RULES (CRITICAL):
+- "summary" must be a concise 2-3 sentence summary capturing the ESSENCE of the email. Never copy raw email text verbatim.
+- Each task "title" must be a clear, actionable summary (action verb + what specifically needs doing). NOT raw email text.
+- Each task "context" must explain WHY this task matters in one sentence.
+- The reader should understand exactly what the email is about and what needs to be done WITHOUT reading the original email.
 
 TASK EXTRACTION:
 - Break down every actionable item into separate tasks
-- Each task needs: title (action verb + specific), due date, context
+- Each task: title (summarized action), due date, context (summarized relevance)
 - For INTERNAL emails ONLY: add suggestedAction — one of: "email-draft", "ppt", "quote", "proposal", "contract-draft", "citation", "report", "spreadsheet", or null
-- For EXTERNAL emails: suggestedAction must always be null (never draft anything for clients)
+- For EXTERNAL emails: suggestedAction must always be null
 
 Respond ONLY with this JSON, no markdown:
 {
-  "priorityScore": <number>,
-  "priorityLabel": "Critical|High|Medium|Low|Junk",
+  "priorityLabel": "Critical|High|Medium|Low",
   "category": "External|Internal",
-  "summary": "<2-3 sentence plain English summary>",
+  "emailType": "<one of the types listed above>",
+  "summary": "<2-3 sentence plain English summary — NOT raw email text>",
   "tasks": [
     {
-      "title": "<action verb + specific task>",
+      "title": "<summarized actionable task — NOT raw email text>",
       "due": "<deadline or 'This week' or 'ASAP'>",
-      "context": "<one sentence>",
+      "context": "<one sentence explaining relevance>",
       "suggestedAction": "<for Internal only: email-draft|ppt|quote|proposal|contract-draft|citation|report|spreadsheet|null>"
     }
-  ],
-  "skipReason": "<only if Junk>"
+  ]
 }
 
-If no tasks, return empty array for tasks.
-If Junk, return empty tasks array and include skipReason.`;
+If no tasks, return empty array for tasks.`;
 
 // ─── IMAP Client ─────────────────────────────────────────────────────────────
 
@@ -168,24 +169,50 @@ function waitForGreeting(socket: tls.TLSSocket): Promise<string> {
   });
 }
 
-// ─── Dedup: track processed message IDs ──────────────────────────────────────
+// ─── UID State: track last processed UID for incremental fetching ────────────
 
-function loadProcessedIds(): Set<string> {
-  try {
-    if (fs.existsSync(PROCESSED_IDS_PATH)) {
-      const data = JSON.parse(fs.readFileSync(PROCESSED_IDS_PATH, "utf-8"));
-      return new Set(data.ids ?? []);
-    }
-  } catch { /* fresh start */ }
-  return new Set();
+interface UidState {
+  uidValidity: number;
+  lastUid: number;
 }
 
-function saveProcessedIds(ids: Set<string>): void {
-  const dir = path.dirname(PROCESSED_IDS_PATH);
+function loadUidState(): UidState {
+  try {
+    if (fs.existsSync(UID_STATE_PATH)) {
+      return JSON.parse(fs.readFileSync(UID_STATE_PATH, "utf-8"));
+    }
+  } catch { /* fresh start */ }
+  return { uidValidity: 0, lastUid: 0 };
+}
+
+function saveUidState(state: UidState): void {
+  const dir = path.dirname(UID_STATE_PATH);
   fs.mkdirSync(dir, { recursive: true });
-  // Keep last 10000 IDs to avoid unbounded growth
-  const arr = [...ids].slice(-10000);
-  fs.writeFileSync(PROCESSED_IDS_PATH, JSON.stringify({ ids: arr }), "utf-8");
+  fs.writeFileSync(UID_STATE_PATH, JSON.stringify(state), "utf-8");
+}
+
+// ─── Daily Rate Limit ────────────────────────────────────────────────────────
+
+interface DailyCount {
+  date: string;
+  count: number;
+}
+
+function loadDailyCount(): DailyCount {
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    if (fs.existsSync(DAILY_COUNT_PATH)) {
+      const data = JSON.parse(fs.readFileSync(DAILY_COUNT_PATH, "utf-8")) as DailyCount;
+      if (data.date === today) return data;
+    }
+  } catch { /* new day */ }
+  return { date: today, count: 0 };
+}
+
+function saveDailyCount(state: DailyCount): void {
+  const dir = path.dirname(DAILY_COUNT_PATH);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(DAILY_COUNT_PATH, JSON.stringify(state), "utf-8");
 }
 
 // ─── Fetch emails ────────────────────────────────────────────────────────────
@@ -211,62 +238,78 @@ async function fetchNewEmails(envOverrides?: Record<string, string>): Promise<Em
     return [];
   }
 
-  const processedIds = loadProcessedIds();
-
-  // Determine search window: use last check time if available, otherwise fetch all
-  let searchCmd = "SEARCH ALL";
-  if (fs.existsSync(LAST_CHECK_PATH)) {
-    try {
-      const lastCheck = new Date(fs.readFileSync(LAST_CHECK_PATH, "utf-8").trim());
-      if (!isNaN(lastCheck.getTime())) {
-        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-        const imapDate = `${lastCheck.getDate()}-${months[lastCheck.getMonth()]}-${lastCheck.getFullYear()}`;
-        searchCmd = `SEARCH SINCE ${imapDate}`;
-      }
-    } catch { /* fall back to SEARCH ALL */ }
+  // Check daily rate limit
+  const dailyState = loadDailyCount();
+  if (dailyState.count >= DAILY_LIMIT) {
+    console.log("[email-task-extractor] Daily rate limit reached (100 emails)");
+    return [];
   }
+  const remaining = DAILY_LIMIT - dailyState.count;
+  const batchSize = Math.min(BATCH_SIZE, remaining);
 
+  const uidState = loadUidState();
   const emails: EmailPayload[] = [];
   const socket = tls.connect(IMAP_PORT, IMAP_HOST, { rejectUnauthorized: false });
 
   try {
     await waitForGreeting(socket);
     await imapCommand(socket, "A001", `LOGIN ${gmailUser} "${gmailPass}"`);
-    await imapCommand(socket, "A002", "SELECT INBOX");
+    const selectResult = await imapCommand(socket, "A002", "SELECT INBOX");
 
-    // Fetch all emails matching the search window
+    // Parse UIDVALIDITY from SELECT response
+    const uidValidityMatch = selectResult.match(/UIDVALIDITY\s+(\d+)/);
+    const uidValidity = uidValidityMatch ? parseInt(uidValidityMatch[1], 10) : 0;
+
+    // If UIDVALIDITY changed, reset (mailbox was recreated)
+    let lastUid = uidState.lastUid;
+    if (uidValidity !== uidState.uidValidity) {
+      lastUid = 0;
+    }
+
+    // Search for UIDs beyond what we've already processed
+    const searchCmd = lastUid === 0
+      ? "UID SEARCH ALL"
+      : `UID SEARCH UID ${lastUid + 1}:*`;
+
     const searchResult = await imapCommand(socket, "A003", searchCmd);
     const searchLine = searchResult.split("\n").find((l) => l.startsWith("* SEARCH"));
     if (!searchLine || searchLine.trim() === "* SEARCH") {
       await imapCommand(socket, "A099", "LOGOUT");
       socket.destroy();
-      saveLastCheckTime();
       return [];
     }
 
-    const messageIds = searchLine.replace("* SEARCH", "").trim().split(/\s+/).filter(Boolean);
+    let uids = searchLine.replace("* SEARCH", "").trim().split(/\s+/).filter(Boolean).map(Number);
+    // Filter out UIDs <= lastUid (IMAP range is inclusive, * maps to highest existing UID)
+    uids = uids.filter((uid) => uid > lastUid);
+    // Sort ascending (oldest first) and take batch
+    uids.sort((a, b) => a - b);
+    const batch = uids.slice(0, batchSize);
 
-    // Fetch all matching emails (dedup handles already-processed ones)
-    for (const id of messageIds) {
+    for (const uid of batch) {
       try {
         const fetchResult = await imapCommand(
           socket,
-          `F${id}`,
-          `FETCH ${id} (BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)] BODY[TEXT])`
+          `F${uid}`,
+          `UID FETCH ${uid} (BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)] BODY[TEXT])`
         );
         const parsed = parseImapFetchResult(fetchResult);
         if (!parsed) continue;
-
-        // Dedup by Message-ID or Subject+From+Date combo
-        const dedupKey = parsed.messageId ?? `${parsed.from}|${parsed.subject}|${parsed.date}`;
-        if (processedIds.has(dedupKey)) continue;
-
-        processedIds.add(dedupKey);
         emails.push(parsed);
       } catch {
         continue;
       }
     }
+
+    // Save position: highest UID we processed
+    if (batch.length > 0) {
+      const maxUid = Math.max(...batch);
+      saveUidState({ uidValidity, lastUid: maxUid });
+    }
+
+    // Update daily count
+    dailyState.count += emails.length;
+    saveDailyCount(dailyState);
 
     await imapCommand(socket, "A099", "LOGOUT");
   } catch (err) {
@@ -278,17 +321,16 @@ async function fetchNewEmails(envOverrides?: Record<string, string>): Promise<Em
     socket.destroy();
   }
 
-  saveProcessedIds(processedIds);
-  saveLastCheckTime();
   return emails;
 }
+
+// ─── IMAP Response Parsing ──────────────────────────────────────────────────
 
 function unfoldHeader(raw: string, headerName: string): string | undefined {
   // RFC 2822: headers can be folded across lines with CRLF+whitespace
   const regex = new RegExp(`^${headerName}:\\s*(.+(?:\\r?\\n[ \\t]+.+)*)`, "im");
   const match = raw.match(regex);
   if (!match) return undefined;
-  // Unfold by collapsing CRLF+whitespace into a single space
   return match[1].replace(/\r?\n[ \t]+/g, " ").trim();
 }
 
@@ -300,6 +342,8 @@ function parseImapFetchResult(raw: string): EmailPayload | null {
     const subjectRaw = unfoldHeader(raw, "Subject");
     const dateMatch = raw.match(/^Date:\s*(.+)$/im);
     const messageIdMatch = raw.match(/^Message-ID:\s*(.+)$/im);
+    const inReplyToRaw = unfoldHeader(raw, "In-Reply-To");
+    const referencesRaw = unfoldHeader(raw, "References");
 
     const from = decodeMimeHeader(fromRaw ?? "");
     const subject = decodeMimeHeader(subjectRaw ?? "");
@@ -316,32 +360,24 @@ function parseImapFetchResult(raw: string): EmailPayload | null {
       to: toRaw,
       cc: ccRaw,
       messageId: messageIdMatch?.[1]?.trim(),
+      inReplyTo: inReplyToRaw,
+      references: referencesRaw,
     };
   } catch {
     return null;
   }
 }
 
-function saveLastCheckTime(): void {
-  const dir = path.dirname(LAST_CHECK_PATH);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(LAST_CHECK_PATH, new Date().toISOString(), "utf-8");
-}
-
 // ─── MIME Decoding ───────────────────────────────────────────────────────────
 
 function decodeMimeHeader(raw: string): string {
-  // First, collapse adjacent encoded words (RFC 2047: whitespace between them is ignored)
   const collapsed = raw.replace(/\?=\s+=\?/g, "?==?");
-  // Decode =?UTF-8?Q?...?= and =?UTF-8?B?...?= encoded headers
   return collapsed.replace(
     /=\?([^?]+)\?(Q|B)\?([^?]*)\?=/gi,
     (_match, charset: string, encoding: string, encoded: string) => {
       if (encoding.toUpperCase() === "B") {
         return Buffer.from(encoded, "base64").toString(charset.toLowerCase() as BufferEncoding || "utf-8");
       }
-      // Q encoding: underscores → spaces, =XX → hex bytes
-      // Collect raw bytes first, then decode as UTF-8
       const withSpaces = encoded.replace(/_/g, " ");
       const bytes: number[] = [];
       let i = 0;
@@ -359,105 +395,62 @@ function decodeMimeHeader(raw: string): string {
   );
 }
 
-// ─── CSV-level Dedup ─────────────────────────────────────────────────────────
+// ─── Thread Detection ────────────────────────────────────────────────────────
 
-const PRIORITY_RANK: Record<string, number> = {
-  Critical: 4,
-  High: 3,
-  Medium: 2,
-  Low: 1,
-  Junk: 0,
-};
-
-interface CsvTaskEntry {
-  lineIndex: number;       // line index in the file (0-based, after header)
-  priority: string;
-  due: string;
-  rawTask: string;         // original task text for fuzzy matching
+function extractThreadId(email: EmailPayload): string {
+  // Thread root is the first Message-ID in References, or In-Reply-To, or own Message-ID
+  if (email.references) {
+    const refs = email.references.trim().split(/\s+/);
+    if (refs.length > 0 && refs[0]) return refs[0];
+  }
+  if (email.inReplyTo) return email.inReplyTo;
+  return email.messageId ?? "";
 }
 
-function extractWords(text: string): Set<string> {
-  return new Set(
-    text.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 2)
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function priorityEmoji(label: string): string {
+  const map: Record<string, string> = {
+    Critical: "🔴",
+    High: "🟠",
+    Medium: "🟡",
+    Low: "🟢",
+  };
+  return map[label] ?? "⚪";
+}
+
+function isInternalEmail(from: string): boolean {
+  return INTERNAL_DOMAINS.some((domain) =>
+    from.toLowerCase().includes(domain)
   );
 }
 
-function wordOverlap(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
-  let common = 0;
-  for (const w of a) if (b.has(w)) common++;
-  // Use min so that if the shorter text's words are mostly in the longer one, it matches
-  return common / Math.min(a.size, b.size);
+function extractSenderName(from: string): string {
+  const match = from.match(/^([^<]+)</);
+  return match ? match[1].trim() : from.split("@")[0];
 }
 
-function loadExistingCsvTaskMap(): Map<string, CsvTaskEntry> {
-  const map = new Map<string, CsvTaskEntry>();
-  try {
-    if (!fs.existsSync(EMAIL_CSV_PATH)) return map;
-    const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
-    const lines = content.split("\n").slice(1); // skip header
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (!line.trim()) continue;
-      const fields = parseCsvLine(line);
-      if (fields.length >= 7) {
-        const subject = decodeMimeHeader(fields[3]).toLowerCase().replace(/[^a-z0-9]/g, "");
-        const task = fields[6].toLowerCase().replace(/[^a-z0-9]/g, "");
-        const key = `${subject}|${task}`;
-        map.set(key, {
-          lineIndex: i,
-          priority: fields[4],
-          due: fields[7] ?? "",
-          rawTask: fields[6],
-        });
-      }
-    }
-  } catch { /* fresh start */ }
-  return map;
+function extractDomain(from: string): string {
+  const match = from.match(/@([^>]+)/);
+  return match ? match[1].trim() : "unknown";
 }
 
-function findFuzzyMatch(
-  existingTasks: Map<string, CsvTaskEntry>,
-  subjectNorm: string,
-  taskTitle: string,
-): CsvTaskEntry | undefined {
-  const taskWords = extractWords(taskTitle);
-  for (const [key, entry] of existingTasks) {
-    const [existSubj] = key.split("|");
-    // Same subject (normalized) and high word overlap in task title
-    if (existSubj === subjectNorm) {
-      const existWords = extractWords(entry.rawTask);
-      if (wordOverlap(taskWords, existWords) >= 0.6) {
-        return entry;
-      }
-    }
+const CSV_HEADER = "Date,From,Company,Subject,Priority,Category,EmailType,Task,Due,SuggestedAction,Status,ThreadId\n";
+
+function ensureCsvHeader(): void {
+  if (!fs.existsSync(EMAIL_CSV_PATH)) {
+    fs.mkdirSync(path.dirname(EMAIL_CSV_PATH), { recursive: true });
+    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER, "utf-8");
+    return;
   }
-  return undefined;
+  const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
+  if (!content.trim() || !content.startsWith("Date,")) {
+    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER + content, "utf-8");
+  }
 }
 
-function updateCsvLine(lineIndex: number, newPriority: string, newDue: string, newDate: string): void {
-  const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
-  const allLines = content.split("\n");
-  // lineIndex is 0-based after header, so actual line is lineIndex + 1
-  const actualIdx = lineIndex + 1;
-  if (actualIdx >= allLines.length) return;
-
-  const fields = parseCsvLine(allLines[actualIdx]);
-  if (fields.length < 10) return;
-
-  // Update date, priority, and due
-  fields[0] = newDate;
-  fields[4] = newPriority;
-  if (newDue) fields[7] = newDue;
-
-  // Rebuild the line — re-quote fields that were originally quoted
-  allLines[actualIdx] = fields.map((f, i) => {
-    // Fields 1,2,3,6 are always quoted in our format
-    if ([1, 2, 3, 6].includes(i) && !f.startsWith('"')) return `"${f}"`;
-    return f;
-  }).join(",");
-
-  fs.writeFileSync(EMAIL_CSV_PATH, allLines.join("\n"), "utf-8");
+function csvEscape(val: string): string {
+  return `"${val.replace(/"/g, "'")}"`;
 }
 
 function parseCsvLine(line: string): string[] {
@@ -479,109 +472,44 @@ function parseCsvLine(line: string): string[] {
   return fields;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function priorityEmoji(label: EmailAnalysis["priorityLabel"]): string {
-  const map = {
-    Critical: "🔴",
-    High: "🟠",
-    Medium: "🟡",
-    Low: "🟢",
-    Junk: "⚫",
-  };
-  return map[label];
-}
-
-function isInternalEmail(from: string): boolean {
-  return INTERNAL_DOMAINS.some((domain) =>
-    from.toLowerCase().includes(domain)
-  );
-}
-
-function extractSenderName(from: string): string {
-  const match = from.match(/^([^<]+)</);
-  return match ? match[1].trim() : from.split("@")[0];
-}
-
-function extractDomain(from: string): string {
-  const match = from.match(/@([^>]+)/);
-  return match ? match[1].trim() : "unknown";
-}
-
-const CSV_HEADER = "Date,From,Company,Subject,Priority,Category,Task,Due,SuggestedAction,Status\n";
-
-function ensureCsvHeader(): void {
-  if (!fs.existsSync(EMAIL_CSV_PATH)) {
-    fs.mkdirSync(path.dirname(EMAIL_CSV_PATH), { recursive: true });
-    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER, "utf-8");
-    return;
-  }
-  // If file exists but is empty or missing header, add it
-  const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
-  if (!content.trim() || !content.startsWith("Date,")) {
-    fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER + content, "utf-8");
-  }
-}
-
-function csvEscape(val: string): string {
-  return `"${val.replace(/"/g, "'")}"`;
-}
+// ─── CSV Writing (no dedup — every email gets a row) ─────────────────────────
 
 function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   ensureCsvHeader();
-  const existingTasks = loadExistingCsvTaskMap();
-  const date = new Date().toISOString().slice(0, 10);
+  const date = email.date
+    ? new Date(email.date).toISOString().slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
   const from = csvEscape(email.from);
   const company = csvEscape(extractDomain(email.from));
-  const decodedSubject = decodeMimeHeader(email.subject);
-  const subject = csvEscape(decodedSubject);
-  const subjectNorm = decodedSubject.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const subject = csvEscape(decodeMimeHeader(email.subject));
+  const threadId = csvEscape(extractThreadId(email));
 
   if (analysis.tasks.length === 0) {
-    const summaryNorm = analysis.summary.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const dedupKey = `${subjectNorm}|${summaryNorm}`;
-    if (existingTasks.has(dedupKey) || findFuzzyMatch(existingTasks, subjectNorm, analysis.summary)) return;
-
     const row = [
       date, from, company, subject,
       analysis.priorityLabel, analysis.category,
-      csvEscape(analysis.summary), "", "", "No action"
+      analysis.emailType,
+      csvEscape(analysis.summary), "", "",
+      "No action", threadId
     ].join(",");
     fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
     return;
   }
 
   for (const task of analysis.tasks) {
-    const taskNorm = task.title.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const dedupKey = `${subjectNorm}|${taskNorm}`;
-    const existing = existingTasks.get(dedupKey) ?? findFuzzyMatch(existingTasks, subjectNorm, task.title);
-
-    if (existing) {
-      // Repeat/reminder email: escalate priority and update due if more urgent
-      const newRank = PRIORITY_RANK[analysis.priorityLabel] ?? 0;
-      const oldRank = PRIORITY_RANK[existing.priority] ?? 0;
-      const escalatedPriority = newRank >= oldRank ? analysis.priorityLabel : existing.priority;
-      // Bump at least one level if same priority on repeat
-      const finalPriority = newRank === oldRank && oldRank < 4
-        ? (Object.entries(PRIORITY_RANK).find(([, v]) => v === oldRank + 1)?.[0] ?? escalatedPriority)
-        : escalatedPriority;
-      const newDue = task.due || existing.due;
-      updateCsvLine(existing.lineIndex, finalPriority, newDue, date);
-      continue;
-    }
-
-    existingTasks.set(dedupKey, { lineIndex: -1, priority: analysis.priorityLabel, due: task.due, rawTask: task.title });
-
     const row = [
       date, from, company, subject,
       analysis.priorityLabel, analysis.category,
+      analysis.emailType,
       csvEscape(task.title), task.due,
       task.suggestedAction ?? "",
-      "Pending"
+      "Pending", threadId
     ].join(",");
     fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
   }
 }
+
+// ─── LLM Analysis ───────────────────────────────────────────────────────────
 
 async function analyzeEmail(email: EmailPayload, apiKey: string): Promise<EmailAnalysis | null> {
   const emailText = [
@@ -640,12 +568,12 @@ const handler: HookHandler = async (event) => {
 
   if (!isCron && !isBootstrap && !isWebhook) return;
 
-  // Throttle bootstrap events: only poll if 5+ minutes since last check
+  // Throttle bootstrap events: only poll if 10+ minutes since last run
   if (isBootstrap) {
     try {
-      if (fs.existsSync(LAST_CHECK_PATH)) {
-        const lastMs = new Date(fs.readFileSync(LAST_CHECK_PATH, "utf-8").trim()).getTime();
-        if (Date.now() - lastMs < 5 * 60 * 1000) return;
+      if (fs.existsSync(DAILY_COUNT_PATH)) {
+        const stat = fs.statSync(DAILY_COUNT_PATH);
+        if (Date.now() - stat.mtimeMs < 10 * 60 * 1000) return;
       }
     } catch { /* first run */ }
   }
@@ -677,7 +605,7 @@ const handler: HookHandler = async (event) => {
           console.log("[email-task-extractor] No new emails found");
           return;
         }
-        console.log(`[email-task-extractor] Found ${emails.length} new email(s)`);
+        console.log(`[email-task-extractor] Processing ${emails.length} email(s) (batch of ${BATCH_SIZE})`);
       }
 
       for (const email of emails) {
@@ -685,12 +613,13 @@ const handler: HookHandler = async (event) => {
         const analysis = await analyzeEmail(email, apiKey);
         if (!analysis) continue;
 
-        if (isInternal) analysis.category = "Internal";
-
-        // Skip junk
-        if (analysis.priorityLabel === "Junk") {
-          console.log(`[email-task-extractor] Skipped junk: "${email.subject}" (${analysis.skipReason})`);
-          continue;
+        // Enforce category and priority rules
+        if (isInternal) {
+          analysis.category = "Internal";
+          // Internal defaults to Medium; LLM can raise but not below Medium unless pure FYI
+        } else {
+          analysis.category = "External";
+          analysis.priorityLabel = "High"; // Always High for external
         }
 
         // Enforce: no suggested actions for external emails
@@ -700,23 +629,24 @@ const handler: HookHandler = async (event) => {
           }
         }
 
-        // Log to CSV
+        // Every email gets logged to CSV — no dedup
         appendTasksToCsv(email, analysis);
 
         const taskCount = analysis.tasks.length;
         console.log(
-          `[email-task-extractor] ${priorityEmoji(analysis.priorityLabel)} ${analysis.priorityLabel} [${analysis.category}]: "${email.subject}" — ${taskCount} task(s)`
+          `[email-task-extractor] ${priorityEmoji(analysis.priorityLabel)} ${analysis.priorityLabel} [${analysis.category}] [${analysis.emailType}]: "${email.subject}" — ${taskCount} task(s)`
         );
 
-        // Surface Critical emails immediately
-        if (analysis.priorityLabel === "Critical") {
+        // Surface Critical/High emails immediately
+        if (analysis.priorityLabel === "Critical" || analysis.priorityLabel === "High") {
           const senderName = extractSenderName(email.from);
           const taskLines = analysis.tasks.map((t) =>
             `  → ${t.title}${t.due !== "None stated" ? ` (Due: ${t.due})` : ""}${t.suggestedAction ? ` [${t.suggestedAction}]` : ""}`
           ).join("\n");
 
+          const emoji = analysis.priorityLabel === "Critical" ? "🔴" : "🟠";
           event.messages.push(
-            `🔴 *Critical email:*\n` +
+            `${emoji} *${analysis.priorityLabel} email [${analysis.emailType}]:*\n` +
             `*From:* ${senderName} (${analysis.category})\n` +
             `*Subject:* ${email.subject}\n\n` +
             `${analysis.summary}\n\n` +
@@ -745,16 +675,18 @@ export const _testExports = {
   appendTasksToCsv,
   ensureCsvHeader,
   priorityEmoji,
-  loadProcessedIds,
-  saveProcessedIds,
   analyzeEmail,
   decodeMimeHeader,
-  loadExistingCsvTaskMap,
-  updateCsvLine,
   parseCsvLine,
-  PRIORITY_RANK,
+  extractThreadId,
+  loadUidState,
+  saveUidState,
+  loadDailyCount,
+  saveDailyCount,
   INTERNAL_DOMAINS,
   EMAIL_CSV_PATH,
-  PROCESSED_IDS_PATH,
-  LAST_CHECK_PATH,
+  UID_STATE_PATH,
+  DAILY_COUNT_PATH,
+  BATCH_SIZE,
+  DAILY_LIMIT,
 };

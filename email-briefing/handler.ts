@@ -21,10 +21,12 @@ interface CsvRow {
   subject: string;
   priority: string;
   category: string;
+  emailType: string;
   task: string;
   due: string;
   suggestedAction: string;
   status: string;
+  threadId: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -77,10 +79,12 @@ function parseCsv(content: string): CsvRow[] {
         subject: fields[3] ?? "",
         priority: fields[4] ?? "",
         category: fields[5] ?? "",
-        task: fields[6] ?? "",
-        due: fields[7] ?? "",
-        suggestedAction: fields[8] ?? "",
-        status: fields[9] ?? "",
+        emailType: fields[6] ?? "",
+        task: fields[7] ?? "",
+        due: fields[8] ?? "",
+        suggestedAction: fields[9] ?? "",
+        status: fields[10] ?? "",
+        threadId: fields[11] ?? "",
       };
     });
 }
@@ -98,7 +102,7 @@ async function generateBriefingSummary(rows: CsvRow[], apiKey: string): Promise<
   const rowSummary = rows
     .map(
       (r) =>
-        `[${r.priority}] [${r.category}] ${r.from} — ${r.subject} | Task: ${r.task} | Due: ${r.due}${r.suggestedAction ? ` | Action: ${r.suggestedAction}` : ""}`
+        `[${r.priority}] [${r.category}] [${r.emailType}] ${r.from} — ${r.subject} | Task: ${r.task} | Due: ${r.due}${r.suggestedAction ? ` | Action: ${r.suggestedAction}` : ""}`
     )
     .join("\n");
 
@@ -175,6 +179,9 @@ const handler: HookHandler = async (event) => {
       const internal = recentRows.filter((r) => r.category === "Internal").length;
       const withTasks = recentRows.filter((r) => r.task && r.status === "Pending").length;
 
+      // Count unique threads
+      const threadIds = new Set(recentRows.map((r) => r.threadId).filter(Boolean));
+
       // Generate AI summary
       const aiSummary = apiKey
         ? await generateBriefingSummary(
@@ -185,7 +192,7 @@ const handler: HookHandler = async (event) => {
 
       const lines: string[] = [
         `📬 *Email Briefing — ${new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })}*`,
-        `${recentRows.length} emails reviewed | ${external} external | ${internal} internal | ${withTasks} tasks pending`,
+        `${recentRows.length} emails | ${external} external | ${internal} internal | ${withTasks} tasks | ${threadIds.size} threads`,
         "",
       ];
 
@@ -197,7 +204,7 @@ const handler: HookHandler = async (event) => {
         if (rows.length === 0) continue;
         lines.push(`${priorityEmoji(priority)} *${priority.toUpperCase()} (${rows.length})*`);
         for (const row of rows) {
-          let taskLine = `• ${row.from} — _${row.subject}_`;
+          let taskLine = `• ${row.from} — _${row.subject}_ [${row.emailType}]`;
           if (row.task && row.status === "Pending") {
             taskLine += `\n  → ${row.task}`;
             if (row.due) taskLine += ` | Due: ${row.due}`;

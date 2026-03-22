@@ -1,6 +1,6 @@
 ---
 name: email-briefing
-description: "Delivers a prioritized morning email briefing. Reads the last 24 hours from email-tasks.csv, groups by priority and category (External/Internal), surfaces tasks with suggested actions for internal items. Runs on cron or on demand."
+description: "Delivers a prioritized morning email briefing. Reads last 24 hours from email-tasks.csv, groups by priority and category, shows email types and thread counts, surfaces tasks with suggested actions for internal items. Runs on cron or on demand."
 metadata: {"openclaw":{"emoji":"🌅","events":["cron"],"requires":{"env":["ANTHROPIC_API_KEY"]}}}
 ---
 
@@ -14,12 +14,12 @@ Read only. Never sends anything. Never drafts anything for external clients.
 
 ## Schedule
 
-Set up via CLI:
+Set up via CLI (every 10 minutes or morning briefing):
 
 ```bash
-openclaw cron add --cron "30 8 * * 1-5" --name "email-briefing" \
-  --message "Run morning email briefing" \
-  --description "Morning email briefing at 8:30 AM weekdays"
+openclaw cron add --cron "*/10 * * * *" --name "email-briefing" \
+  --message "Run email briefing" \
+  --description "Email briefing every 10 minutes"
 ```
 
 ## On-Demand

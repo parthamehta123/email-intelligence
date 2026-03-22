@@ -58,9 +58,11 @@ const INTERNAL_DOMAINS = [
 openclaw hooks enable email-task-extractor
 openclaw hooks enable email-briefing
 
-openclaw cron add --cron "*/5 * * * *" --name "email-poll" \
+# Poll every 10 minutes, batch of 10 emails, 100/day max
+openclaw cron add --cron "*/10 * * * *" --name "email-poll" \
   --message "check emails" --session isolated --no-deliver
 
+# Morning briefing at 8:30 AM weekdays
 openclaw cron add --cron "30 8 * * 1-5" --name "email-briefing" \
   --message "Run morning email briefing"
 
@@ -69,9 +71,10 @@ openclaw gateway restart
 
 ## Done
 
-- Emails polled every 5 minutes
+- Emails polled every 10 minutes (10 per batch, 100/day max)
 - Tasks written to `~/Documents/email-tasks.csv`
 - Morning briefing at 8:30 AM weekdays
 - Say "check emails" or "email tasks" anytime
-- Duplicate/reminder emails auto-escalate existing tasks instead of creating new rows
-- MIME-encoded subjects (UTF-8) are decoded automatically
+- Every email gets processed — no dedup, no skipping
+- AI summarizes tasks clearly — never raw email text
+- Threads tracked via ThreadId column
