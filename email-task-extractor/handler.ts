@@ -448,8 +448,16 @@ function ensureCsvHeader(): void {
     fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER, "utf-8");
     return;
   }
-  const firstLine = content.split("\n")[0];
-  if (!firstLine.startsWith("EmailDate,ProcessedDate,")) {
+  const lines = content.split("\n");
+  const firstLine = lines[0];
+  if (firstLine.startsWith("EmailDate,ProcessedDate,")) {
+    return; // correct header already present
+  }
+  // Replace old header if present, otherwise prepend new header
+  if (firstLine.startsWith("Date,") || firstLine.startsWith("EmailDate,")) {
+    lines[0] = CSV_HEADER.trimEnd();
+    fs.writeFileSync(EMAIL_CSV_PATH, lines.join("\n"), "utf-8");
+  } else {
     fs.writeFileSync(EMAIL_CSV_PATH, CSV_HEADER + content, "utf-8");
   }
 }
