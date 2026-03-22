@@ -331,19 +331,30 @@ function saveLastCheckTime(): void {
 // ─── MIME Decoding ───────────────────────────────────────────────────────────
 
 function decodeMimeHeader(raw: string): string {
+  // First, collapse adjacent encoded words (RFC 2047: whitespace between them is ignored)
+  const collapsed = raw.replace(/\?=\s+=\?/g, "?==?");
   // Decode =?UTF-8?Q?...?= and =?UTF-8?B?...?= encoded headers
-  return raw.replace(
+  return collapsed.replace(
     /=\?([^?]+)\?(Q|B)\?([^?]*)\?=/gi,
-    (_match, _charset: string, encoding: string, encoded: string) => {
+    (_match, charset: string, encoding: string, encoded: string) => {
       if (encoding.toUpperCase() === "B") {
-        return Buffer.from(encoded, "base64").toString("utf-8");
+        return Buffer.from(encoded, "base64").toString(charset.toLowerCase() as BufferEncoding || "utf-8");
       }
-      // Q encoding: underscores → spaces, =XX → hex byte
-      return encoded
-        .replace(/_/g, " ")
-        .replace(/=([0-9A-Fa-f]{2})/g, (_m: string, hex: string) =>
-          String.fromCharCode(parseInt(hex, 16))
-        );
+      // Q encoding: underscores → spaces, =XX → hex bytes
+      // Collect raw bytes first, then decode as UTF-8
+      const withSpaces = encoded.replace(/_/g, " ");
+      const bytes: number[] = [];
+      let i = 0;
+      while (i < withSpaces.length) {
+        if (withSpaces[i] === "=" && i + 2 < withSpaces.length) {
+          bytes.push(parseInt(withSpaces.substring(i + 1, i + 3), 16));
+          i += 3;
+        } else {
+          bytes.push(withSpaces.charCodeAt(i));
+          i++;
+        }
+      }
+      return Buffer.from(bytes).toString("utf-8");
     }
   );
 }
@@ -362,6 +373,7 @@ interface CsvTaskEntry {
   lineIndex: number;       // line index in the file (0-based, after header)
   priority: string;
   due: string;
+  rawTask: string;         // original task text for fuzzy matching
 }
 
 function extractWords(text: string): Set<string> {
@@ -374,7 +386,8 @@ function wordOverlap(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 || b.size === 0) return 0;
   let common = 0;
   for (const w of a) if (b.has(w)) common++;
-  return common / Math.max(a.size, b.size);
+  // Use min so that if the shorter text's words are mostly in the longer one, it matches
+  return common / Math.min(a.size, b.size);
 }
 
 function loadExistingCsvTaskMap(): Map<string, CsvTaskEntry> {
@@ -395,6 +408,7 @@ function loadExistingCsvTaskMap(): Map<string, CsvTaskEntry> {
           lineIndex: i,
           priority: fields[4],
           due: fields[7] ?? "",
+          rawTask: fields[6],
         });
       }
     }
@@ -409,10 +423,10 @@ function findFuzzyMatch(
 ): CsvTaskEntry | undefined {
   const taskWords = extractWords(taskTitle);
   for (const [key, entry] of existingTasks) {
-    const [existSubj, existTask] = key.split("|");
+    const [existSubj] = key.split("|");
     // Same subject (normalized) and high word overlap in task title
     if (existSubj === subjectNorm) {
-      const existWords = extractWords(existTask);
+      const existWords = extractWords(entry.rawTask);
       if (wordOverlap(taskWords, existWords) >= 0.6) {
         return entry;
       }
@@ -556,7 +570,7 @@ function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
       continue;
     }
 
-    existingTasks.set(dedupKey, { lineIndex: -1, priority: analysis.priorityLabel, due: task.due });
+    existingTasks.set(dedupKey, { lineIndex: -1, priority: analysis.priorityLabel, due: task.due, rawTask: task.title });
 
     const row = [
       date, from, company, subject,
