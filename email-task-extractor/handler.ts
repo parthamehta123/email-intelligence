@@ -621,7 +621,10 @@ const handler: HookHandler = async (event) => {
         console.log(`[email-task-extractor] Processing ${emails.length} email(s) (batch of ${BATCH_SIZE})`);
       }
 
-      for (const email of emails) {
+      for (let i = 0; i < emails.length; i++) {
+        const email = emails[i];
+        // Delay between API calls to avoid 429 rate limits
+        if (i > 0) await new Promise((r) => setTimeout(r, 2000));
         const isInternal = isInternalEmail(email.from);
         const analysis = await analyzeEmail(email, apiKey);
         if (!analysis) continue;
