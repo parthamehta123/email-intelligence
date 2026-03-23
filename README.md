@@ -1,75 +1,90 @@
-# Email Intelligence Pack
+# Email Intelligence
 
-Read-only Gmail intelligence for a senior account manager. Monitors all emails, categorizes as Internal or External, extracts AI-summarized tasks, classifies email types, tracks threads, and delivers prioritized briefings. **Never sends anything.**
+AI-powered email monitoring that reads your Gmail, understands every email through LLM reasoning, and outputs a clean spreadsheet of who emailed you, what they need, and what you should do — so you never have to dig through your inbox again.
+
+**Read-only. Never sends, replies, or modifies anything.**
+
+---
+
+## The Problem
+
+You get 100+ emails a day. Newsletters, client requests, vendor notifications, escalations, auto-replies — all mixed together. You spend the first hour of every morning just triaging. Half the emails don't need you. The ones that do get buried.
+
+## The Solution
+
+Email Intelligence connects to your Gmail via IMAP, reads every email, and uses Claude AI to produce a 4-column spreadsheet:
+
+| From | Subject | Tasks | SuggestedAction |
+|------|---------|-------|-----------------|
+| Sarah Chen | Urgent — Q3 Enterprise Renewal | Client needs revised proposal with 15% volume discount and 99.9% SLA by Friday. 1. Prepare revised enterprise renewal proposal (Due: Friday) 2. Include Q1 usage analytics for board deck (Due: Friday) | |
+| AWS | Action required — account past due | AWS billing notification — payment failed on card ending 1440. 1. Resolve past-due payment (Due: ASAP) | |
+| Databricks Team | How to build ETL pipelines fast | Databricks marketing newsletter promoting O'Reilly guide on ETL pipelines. No action needed. | |
+| Manager | Prepare TechCorp status deck | Internal request to prepare status update for TechCorp account review. 1. Build TechCorp status deck with pipeline numbers (Due: Tomorrow) 2. Draft response to TechCorp VP (Due: Tomorrow) | ppt, email-draft |
+
+Open the spreadsheet. Scan it. Know exactly what every email is about and what to do. Never open the email.
 
 ---
 
 ## How It Works
 
 ```
-External emails → READ ONLY. Always High priority. Extract summarized tasks to CSV. Never draft or respond.
-Internal emails → READ ONLY. Default Medium priority. Extract tasks. Suggest solutions (drafts, PPTs, quotes, proposals).
-All emails      → Never send, reply, or modify inbox. Process every email. AI summarizes tasks clearly.
+Gmail (IMAP) → Every email fetched → Claude AI analyzes each one → Clean CSV/Excel output
 ```
 
+1. Connects to Gmail via IMAP (app password, no OAuth complexity)
+2. Fetches every email — no lookback limit, processes historical emails too
+3. Claude Haiku reads each email and reasons step-by-step:
+   - Who sent this? Client? Vendor? Newsletter? Auto-reply?
+   - What's the business impact? Does the account manager need to act?
+   - What specifically needs to be done? By when?
+4. Writes one row per email to `~/Documents/email-tasks.csv`
+5. Runs automatically every 10 minutes
+
+## Smart Priority Reasoning
+
+The AI doesn't just flag everything as important. It thinks about each email:
+
+| What it sees | Priority | Tasks output |
+|-------------|----------|-------------|
+| Client escalation, SLA breach | **Critical** | Full context + detailed numbered actions |
+| Direct client request, proposal needed | **High** | Full context + actions with due dates |
+| Vendor notification needing review | **Medium** | Context + actions |
+| Newsletter, auto-reply, verification code | **Low** | One sentence: "No action needed." |
+
+## External vs Internal
+
+- **External emails** (clients, vendors, partners): Extract tasks only. Never suggest drafts — clients don't want AI-generated responses
+- **Internal emails** (colleagues, managers): Extract tasks + suggest what deliverable is needed (email-draft, PPT, proposal, spreadsheet, etc.)
+
 ---
 
-## What's Included
+## Quick Start
 
-| Component | Type | Purpose |
-|-----------|------|---------|
-| `gmail-intel/` | Skill | On-demand email parsing + briefing when you ask |
-| `email-task-extractor/` | Hook | Polls Gmail via IMAP, extracts AI-summarized tasks to CSV |
-| `email-briefing/` | Hook | Morning briefing — reads CSV, summarizes by priority |
+### 1. Enable IMAP in Gmail
 
----
+Gmail Settings → Forwarding and POP/IMAP → Enable IMAP
 
-## Output
+### 2. Create a Gmail App Password
 
-| File | Contents |
-|------|----------|
-| `~/Documents/email-tasks.csv` | Every email processed: priority, category, email type, summarized tasks, due dates, suggested actions, thread tracking |
+1. Enable 2-Step Verification at https://myaccount.google.com/security
+2. Go to https://myaccount.google.com/apppasswords
+3. Create an app password (16 characters)
 
-CSV columns: `Date, From, Company, Subject, Priority, Category, EmailType, Task, Due, SuggestedAction, Status, ThreadId`
-
-- **External tasks:** Always High priority. SuggestedAction is always empty (never draft for clients)
-- **Internal tasks:** Default Medium priority. SuggestedAction can be: `email-draft`, `ppt`, `quote`, `proposal`, `contract-draft`, `citation`, `report`, `spreadsheet`
-- **Task column:** AI-summarized actionable items — never raw email text
-- **ThreadId:** Links related emails in the same thread
-
----
-
-## Installation
-
-### Step 1 — Copy files
+### 3. Install
 
 ```bash
-cp -r gmail-intel ~/.openclaw/skills/
 cp -r email-task-extractor email-briefing ~/.openclaw/hooks/
+cp -r gmail-intel ~/.openclaw/skills/
 ```
 
-### Step 2 — Enable IMAP in Gmail
+### 4. Add credentials
 
-Gmail → Settings → Forwarding and POP/IMAP → make sure IMAP is enabled. Most accounts have it on by default.
-
-### Step 3 — Create a Gmail App Password
-
-1. Enable 2-Step Verification at https://myaccount.google.com/security (if not already on)
-2. Go to https://myaccount.google.com/apppasswords
-3. Type `openclaw` as the app name, click Create
-4. Copy the 16-character password
-
-### Step 4 — Add credentials to ~/.openclaw/openclaw.json
-
-Add env vars to both hooks and the skill. The hooks need credentials to poll Gmail and call Claude:
+Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
   "hooks": {
-    "enabled": true,
-    "token": "YOUR_HOOK_TOKEN",
     "internal": {
-      "enabled": true,
       "entries": {
         "email-task-extractor": {
           "enabled": true,
@@ -81,21 +96,7 @@ Add env vars to both hooks and the skill. The hooks need credentials to poll Gma
         },
         "email-briefing": {
           "enabled": true,
-          "env": {
-            "ANTHROPIC_API_KEY": "sk-ant-..."
-          }
-        }
-      }
-    }
-  },
-  "skills": {
-    "entries": {
-      "gmail-intel": {
-        "enabled": true,
-        "env": {
-          "GMAIL_ACCOUNT": "your@gmail.com",
-          "GMAIL_APP_PASSWORD": "xxxx xxxx xxxx xxxx",
-          "ANTHROPIC_API_KEY": "sk-ant-..."
+          "env": { "ANTHROPIC_API_KEY": "sk-ant-..." }
         }
       }
     }
@@ -103,109 +104,48 @@ Add env vars to both hooks and the skill. The hooks need credentials to poll Gma
 }
 ```
 
-### Step 5 — Enable hooks
-
-```bash
-openclaw hooks enable email-task-extractor
-openclaw hooks enable email-briefing
-```
-
-### Step 6 — Add cron jobs
-
-```bash
-# Poll Gmail every 10 minutes (processes 10 emails per batch, 100/day max)
-openclaw cron add --cron "*/10 * * * *" --name "email-poll" \
-  --message "check emails" --description "Poll Gmail via IMAP" \
-  --session isolated --no-deliver
-
-# Morning briefing at 8:30 AM weekdays
-openclaw cron add --cron "30 8 * * 1-5" --name "email-briefing" \
-  --message "Run morning email briefing" \
-  --description "Morning email briefing"
-```
-
-### Step 7 — Add your internal domains
+### 5. Configure internal domains
 
 Edit `~/.openclaw/hooks/email-task-extractor/handler.ts`:
 
 ```typescript
-const INTERNAL_DOMAINS = [
-  "clarivate.com",
-  "clarivate.io",
-  // add your domains here
-];
+const INTERNAL_DOMAINS = ["yourcompany.com"];
 ```
 
-Restart the gateway: `openclaw gateway restart`
+### 6. Enable and restart
+
+```bash
+openclaw hooks enable email-task-extractor email-briefing
+openclaw gateway restart
+```
+
+Emails start processing automatically every 10 minutes. Output: `~/Documents/email-tasks.csv`
 
 ---
 
-## Usage
+## Architecture
 
-```
-"check emails"               → Full briefing of recent emails
-"what's urgent"              → Critical + High only
-"email tasks"                → All tasks extracted from emails
-"parse emails from Acme"     → Focus on specific sender
-"any client emails I missed" → External only
-
-[Automatic]
-→ Every 10 min: polls Gmail, processes 10 emails per batch
-→ Critical/High emails: immediate alert
-→ 8:30 AM weekdays: morning briefing
-→ Daily limit: 100 emails/day (resets at midnight)
-```
-
----
-
-## Morning Briefing Example
-
-```
-📬 Email Briefing — Tue 18 Mar
-12 emails | 7 external | 5 internal | 4 tasks | 8 threads
-
-💡 Two client renewals need attention — Acme and TechCorp both have
-   outstanding proposals. One internal escalation needs a response today.
-
-🟠 HIGH (3)
-• john@acme.com — Re: Q2 Renewal Discussion [contract-discussion]
-  → Review and send updated renewal proposal | Due: 2026-03-19
-• sarah@techcorp.com — Pricing query for enterprise tier [proposal-request]
-  → Prepare and share pricing deck | Due: This week
-• manager@clarivate.com — Escalation: TechCorp account [escalation]
-  → Prepare account status update with key metrics | Due: ASAP [email-draft]
-
-🟡 MEDIUM (1)
-• ops@clarivate.com — Q1 pipeline review next week [meeting-request]
-  → Compile pipeline numbers for review meeting | Due: 2026-03-24 [spreadsheet]
-```
-
----
-
-## Processing Model
-
-- **No dedup**: Every email gets its own CSV row. Follow-ups, reminders, and thread replies all appear individually.
-- **Batch processing**: 10 emails per cron run (every 10 minutes)
-- **Daily rate limit**: 100 emails/day, resets at midnight
-- **No lookback limit**: First run processes all historical emails. Subsequent runs pick up where they left off using UID tracking.
-- **Thread tracking**: Emails in the same thread share a ThreadId (from References/In-Reply-To headers)
-- **AI summarization**: Tasks are always properly summarized — never raw email text dumps
-
----
-
-## Priority Rules
-
-| Category | Priority | Rule |
-|----------|----------|------|
-| External | Always High | Every client/vendor email is High priority |
-| Internal | Default Medium | Raised to High/Critical only for clear urgency |
-| Internal | Low | Only for pure FYI/no-action emails |
-
----
+- **IMAP polling** — no Gmail API, no OAuth, no GCP. Just IMAP + app password
+- **Claude Haiku** — fast, cheap, accurate enough for email classification
+- **CSV output** — open in Excel, Google Sheets, or any tool. No proprietary format
+- **UID tracking** — processes emails incrementally, never re-processes the same email
+- **10 per batch** — rate-limited to avoid API throttling, with automatic retry on 429
+- **Read-only** — enforced in both the LLM prompt and code. Even if the AI hallucinates a send action, the code blocks it
 
 ## Guardrails
 
-- External emails: tasks only, no drafts ever (clients hate AI slop)
-- Internal emails: tasks + suggested actions (drafts, PPTs, quotes, proposals, contracts, citations)
-- The handler enforces this in code — even if the LLM suggests an action for an external email, it gets stripped
-- All suggested actions are just labels — the agent doesn't auto-generate them, it flags what type of deliverable is needed
+- The system prompt explicitly prohibits sending, replying, forwarding, or modifying emails
+- External emails: `suggestedAction` is forcefully cleared in code regardless of LLM output
+- Email body capped at 50KB before sending to AI
+- App passwords (not full account credentials)
+- No email bodies stored — only AI-generated summaries in the CSV
+
+---
+
+## Tech Stack
+
+TypeScript, Node.js, IMAP over TLS, Claude Haiku API, Vitest for tests. Zero external databases or cloud dependencies.
+
+## License
+
+MIT
