@@ -67,30 +67,46 @@ ABSOLUTE RULES:
 
 Return structured JSON only.`;
 
-const ANALYSIS_PROMPT = `You are analyzing an email for a senior account manager at Clarivate (analytics/data company). Think step-by-step.
+const ANALYSIS_PROMPT = `You are analyzing an email for a senior account manager at Clarivate (analytics/data company). Think carefully step-by-step.
 
 STEP 1 — CATEGORY:
-- "External": from outside Clarivate (clients, prospects, vendors, partners, automated services)
+- "External": from outside Clarivate (clients, prospects, vendors, partners, automated services, newsletters)
 - "Internal": from inside Clarivate (colleagues, managers, leadership)
 
-STEP 2 — PRIORITY:
-- External emails: ALWAYS "High"
-- Internal emails: Default "Medium". Raise only for clear urgency. Lower to "Low" only for pure FYI.
+STEP 2 — PRIORITY (think carefully about this):
+For EXTERNAL emails, reason about who sent it and why:
+- "Critical": Client escalation, SLA breach, urgent contract deadline, revenue at risk
+- "High": Direct client request, proposal needed, renewal discussion, billing issue requiring action
+- "Medium": Vendor notification needing review, service update with action required, follow-up on ongoing work
+- "Low": Newsletters, marketing, auto-replies, verification codes, account notifications, FYI-only vendor emails
+Think: "Does this email require the account manager to personally act? How soon? What's the business impact if ignored?"
+
+For INTERNAL emails:
+- Default "Medium". Raise to "High"/"Critical" only for clear urgency (deadline, escalation, executive request). Lower to "Low" for pure FYI.
 
 STEP 3 — EMAIL TYPE (pick one):
-"meeting-request", "task-assignment", "follow-up", "status-update", "escalation", "approval-request", "information-sharing", "introduction", "feedback-request", "contract-discussion", "proposal-request", "invoice-billing", "technical-issue", "newsletter", "auto-reply", "calendar-invite", "other"
+"client-request", "client-escalation", "meeting-request", "task-assignment", "follow-up", "status-update", "escalation", "approval-request", "information-sharing", "introduction", "feedback-request", "contract-discussion", "proposal-request", "invoice-billing", "technical-issue", "newsletter", "auto-reply", "calendar-invite", "vendor-notification", "security-alert", "other"
 
 STEP 4 — TASKS (this is the most important field):
-Read the ENTIRE email carefully, including any thread/chain history. Then produce a single text block that:
-- Starts with a 1-2 sentence context summary of what this email is about
-- Followed by numbered action items: "1. [action] (Due: [date]) 2. [action] (Due: [date])"
-- Each action must be a clear, specific, actionable task — NOT raw email text
+Read the ENTIRE email carefully, including any thread/chain history. Then produce a single text block:
+
+For HIGH-PRIORITY external emails (client requests, escalations, proposals, contracts):
+- Start with 2-3 sentences explaining the full context: who is asking, what they need, why, any history
+- Then numbered action items: "1. [specific action] (Due: [date]) 2. [action] (Due: [date])"
+- Be thorough — capture every detail the account manager needs to act without opening the email
+
+For LOW-PRIORITY external emails (newsletters, auto-replies, notifications):
+- Write ONE concise sentence: what it is and whether any action is needed
+- Example: "AWS marketing newsletter about new AI features. No action needed."
+- Do NOT pad with unnecessary detail for emails that don't matter
+
+For ALL emails:
+- Each action must be clear, specific, and actionable — NOT raw email text
 - Include due dates where mentioned or implied
-- If no actions needed, just write the context summary
-- The reader should fully understand the email and what needs doing WITHOUT reading the original
+- The reader should fully understand the email and what to do WITHOUT reading the original
 
 STEP 5 — SUGGESTED ACTION (Internal emails ONLY):
-For internal emails, suggest what type of deliverable is needed: "email-draft", "ppt", "quote", "proposal", "contract-draft", "citation", "report", "spreadsheet"
+For internal emails, suggest deliverable type: "email-draft", "ppt", "quote", "proposal", "contract-draft", "citation", "report", "spreadsheet"
 For external emails: ALWAYS return empty string ""
 If multiple, comma-separate them.
 
@@ -99,8 +115,8 @@ Respond ONLY with this JSON, no markdown:
   "priorityLabel": "Critical|High|Medium|Low",
   "category": "External|Internal",
   "emailType": "<one of the types above>",
-  "tasks": "<context summary + numbered action items as described above>",
-  "suggestedAction": "<for Internal: deliverable types comma-separated | for External: empty string>"
+  "tasks": "<context + numbered actions as described above>",
+  "suggestedAction": "<for Internal: deliverable types | for External: empty string>"
 }`;
 
 // ─── IMAP Client ─────────────────────────────────────────────────────────────
@@ -586,13 +602,11 @@ const handler: HookHandler = async (event) => {
         const analysis = await analyzeEmail(email, apiKey);
         if (!analysis) continue;
 
-        // Enforce category and priority rules
+        // Enforce category based on domain (LLM may misclassify)
         if (isInternal) {
           analysis.category = "Internal";
-          // Internal defaults to Medium; LLM can raise but not below Medium unless pure FYI
         } else {
           analysis.category = "External";
-          analysis.priorityLabel = "High"; // Always High for external
         }
 
         // Enforce: no suggested actions for external emails

@@ -473,18 +473,12 @@ describe("guardrail rules", () => {
     expect(analysis.suggestedAction).toBe("email-draft");
   });
 
-  it("external emails always get High priority", () => {
-    const analysis = {
-      priorityLabel: "Low" as const,
-      category: "External" as const,
-    };
-
-    // Simulate handler enforcement
-    if (analysis.category === "External") {
-      (analysis as any).priorityLabel = "High";
-    }
-
-    expect(analysis.priorityLabel).toBe("High");
+  it("external email priority is set by LLM reasoning", () => {
+    // LLM determines priority based on email content — no forced override
+    const clientEmail = { priorityLabel: "High" as const, category: "External" as const };
+    const newsletter = { priorityLabel: "Low" as const, category: "External" as const };
+    expect(clientEmail.priorityLabel).toBe("High");
+    expect(newsletter.priorityLabel).toBe("Low");
   });
 });
 
@@ -522,7 +516,7 @@ describe("source code invariants", () => {
     expect(source).toContain("REFERENCES");
   });
 
-  it("forces External emails to High priority", () => {
-    expect(source).toContain('analysis.priorityLabel = "High"; // Always High for external');
+  it("does not force External emails to High priority", () => {
+    expect(source).not.toContain('analysis.priorityLabel = "High"; // Always High for external');
   });
 });
