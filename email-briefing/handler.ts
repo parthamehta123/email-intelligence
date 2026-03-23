@@ -15,19 +15,10 @@ const MODEL = "claude-haiku-4-5-20251001";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface CsvRow {
-  emailDate: string;
-  processedDate: string;
   from: string;
-  company: string;
   subject: string;
-  priority: string;
-  category: string;
-  emailType: string;
-  task: string;
-  due: string;
+  tasks: string;
   suggestedAction: string;
-  status: string;
-  threadId: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -74,28 +65,17 @@ function parseCsv(content: string): CsvRow[] {
       fields.push(current.trim());
 
       return {
-        emailDate: fields[0] ?? "",
-        processedDate: fields[1] ?? "",
-        from: fields[2] ?? "",
-        company: fields[3] ?? "",
-        subject: fields[4] ?? "",
-        priority: fields[5] ?? "",
-        category: fields[6] ?? "",
-        emailType: fields[7] ?? "",
-        task: fields[8] ?? "",
-        due: fields[9] ?? "",
-        suggestedAction: fields[10] ?? "",
-        status: fields[11] ?? "",
-        threadId: fields[12] ?? "",
+        from: fields[0] ?? "",
+        subject: fields[1] ?? "",
+        tasks: fields[2] ?? "",
+        suggestedAction: fields[3] ?? "",
       };
     });
 }
 
-function getLast24HoursRows(rows: CsvRow[]): CsvRow[] {
-  const cutoff = new Date();
-  cutoff.setHours(cutoff.getHours() - 24);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
-  return rows.filter((r) => r.processedDate >= cutoffStr && r.status === "Pending");
+function getRecentRows(rows: CsvRow[]): CsvRow[] {
+  // Return all rows — no date filtering since CSV has no date column
+  return rows;
 }
 
 async function generateBriefingSummary(rows: CsvRow[], apiKey: string): Promise<string> {
@@ -104,7 +84,7 @@ async function generateBriefingSummary(rows: CsvRow[], apiKey: string): Promise<
   const rowSummary = rows
     .map(
       (r) =>
-        `[${r.priority}] [${r.category}] [${r.emailType}] ${r.from} — ${r.subject} | Task: ${r.task} | Due: ${r.due}${r.suggestedAction ? ` | Action: ${r.suggestedAction}` : ""}`
+        `${r.from} — ${r.subject} | Tasks: ${r.tasks || "None"}${r.suggestedAction ? ` | Action: ${r.suggestedAction}` : ""}`
     )
     .join("\n");
 
@@ -157,44 +137,21 @@ const handler: HookHandler = async (event) => {
 
       const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
       const allRows = parseCsv(content);
-      const recentRows = getLast24HoursRows(allRows);
+      const rows = getRecentRows(allRows);
 
-      if (recentRows.length === 0) {
-        event.messages.push("📬 *Email Briefing* — No pending email tasks from the last 24 hours. Inbox is clear.");
+      if (rows.length === 0) {
+        event.messages.push("📬 *Email Briefing* — No emails processed yet.");
         return;
       }
 
-      // Group by priority
-      const byPriority: Record<string, CsvRow[]> = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: [],
-      };
-
-      for (const row of recentRows) {
-        const bucket = byPriority[row.priority];
-        if (bucket) bucket.push(row);
-      }
-
-      const external = recentRows.filter((r) => r.category === "External").length;
-      const internal = recentRows.filter((r) => r.category === "Internal").length;
-      const withTasks = recentRows.filter((r) => r.task && r.status === "Pending").length;
-
-      // Count unique threads
-      const threadIds = new Set(recentRows.map((r) => r.threadId).filter(Boolean));
-
       // Generate AI summary
       const aiSummary = apiKey
-        ? await generateBriefingSummary(
-            recentRows.filter((r) => ["Critical", "High"].includes(r.priority)),
-            apiKey
-          )
+        ? await generateBriefingSummary(rows.slice(-20), apiKey)
         : "";
 
       const lines: string[] = [
         `📬 *Email Briefing — ${new Date().toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })}*`,
-        `${recentRows.length} emails | ${external} external | ${internal} internal | ${withTasks} tasks | ${threadIds.size} threads`,
+        `${rows.length} emails processed`,
         "",
       ];
 
@@ -202,22 +159,15 @@ const handler: HookHandler = async (event) => {
         lines.push(`💡 _${aiSummary}_`, "");
       }
 
-      for (const [priority, rows] of Object.entries(byPriority)) {
-        if (rows.length === 0) continue;
-        lines.push(`${priorityEmoji(priority)} *${priority.toUpperCase()} (${rows.length})*`);
-        for (const row of rows) {
-          let taskLine = `• ${row.from} — _${row.subject}_ [${row.emailType}]`;
-          if (row.task && row.status === "Pending") {
-            taskLine += `\n  → ${row.task}`;
-            if (row.due) taskLine += ` | Due: ${row.due}`;
-            if (row.suggestedAction) taskLine += ` [${row.suggestedAction}]`;
-          }
-          lines.push(taskLine);
+      for (const row of rows.slice(-20)) {
+        let taskLine = `• ${row.from} — _${row.subject}_`;
+        if (row.tasks) {
+          taskLine += `\n  → ${row.tasks}`;
+          if (row.suggestedAction) taskLine += ` [${row.suggestedAction}]`;
         }
-        lines.push("");
+        lines.push(taskLine);
       }
 
-      lines.push(`Say *"email tasks"* to see your full task list.`);
       event.messages.push(lines.join("\n"));
     } catch (err) {
       console.error(

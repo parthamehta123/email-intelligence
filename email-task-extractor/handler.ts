@@ -22,13 +22,8 @@ interface EmailAnalysis {
   priorityLabel: "Critical" | "High" | "Medium" | "Low";
   category: "External" | "Internal";
   emailType: string;
-  summary: string;
-  tasks: Array<{
-    title: string;
-    due: string;
-    context: string;
-    suggestedAction?: string;
-  }>;
+  tasks: string;
+  suggestedAction: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -72,48 +67,41 @@ ABSOLUTE RULES:
 
 Return structured JSON only.`;
 
-const ANALYSIS_PROMPT = `Analyze this email for a senior account manager at Clarivate (analytics/data company).
+const ANALYSIS_PROMPT = `You are analyzing an email for a senior account manager at Clarivate (analytics/data company). Think step-by-step.
 
-CATEGORY:
-- "External": from outside Clarivate (clients, prospects, vendors, partners)
+STEP 1 — CATEGORY:
+- "External": from outside Clarivate (clients, prospects, vendors, partners, automated services)
 - "Internal": from inside Clarivate (colleagues, managers, leadership)
 
-PRIORITY RULES:
-- External emails: ALWAYS assign "High"
-- Internal emails: Default to "Medium". Raise to "High" or "Critical" only for clear urgency (deadline, escalation, executive request). Lower to "Low" only for pure FYI/no-action emails.
+STEP 2 — PRIORITY:
+- External emails: ALWAYS "High"
+- Internal emails: Default "Medium". Raise only for clear urgency. Lower to "Low" only for pure FYI.
 
-EMAIL TYPE — classify the email as one of:
+STEP 3 — EMAIL TYPE (pick one):
 "meeting-request", "task-assignment", "follow-up", "status-update", "escalation", "approval-request", "information-sharing", "introduction", "feedback-request", "contract-discussion", "proposal-request", "invoice-billing", "technical-issue", "newsletter", "auto-reply", "calendar-invite", "other"
 
-SUMMARIZATION RULES (CRITICAL):
-- "summary" must be a concise 2-3 sentence summary capturing the ESSENCE of the email. Never copy raw email text verbatim.
-- Each task "title" must be a clear, actionable summary (action verb + what specifically needs doing). NOT raw email text.
-- Each task "context" must explain WHY this task matters in one sentence.
-- The reader should understand exactly what the email is about and what needs to be done WITHOUT reading the original email.
+STEP 4 — TASKS (this is the most important field):
+Read the ENTIRE email carefully, including any thread/chain history. Then produce a single text block that:
+- Starts with a 1-2 sentence context summary of what this email is about
+- Followed by numbered action items: "1. [action] (Due: [date]) 2. [action] (Due: [date])"
+- Each action must be a clear, specific, actionable task — NOT raw email text
+- Include due dates where mentioned or implied
+- If no actions needed, just write the context summary
+- The reader should fully understand the email and what needs doing WITHOUT reading the original
 
-TASK EXTRACTION:
-- Break down every actionable item into separate tasks
-- Each task: title (summarized action), due date, context (summarized relevance)
-- For INTERNAL emails ONLY: add suggestedAction — one of: "email-draft", "ppt", "quote", "proposal", "contract-draft", "citation", "report", "spreadsheet", or null
-- For EXTERNAL emails: suggestedAction must always be null
+STEP 5 — SUGGESTED ACTION (Internal emails ONLY):
+For internal emails, suggest what type of deliverable is needed: "email-draft", "ppt", "quote", "proposal", "contract-draft", "citation", "report", "spreadsheet"
+For external emails: ALWAYS return empty string ""
+If multiple, comma-separate them.
 
 Respond ONLY with this JSON, no markdown:
 {
   "priorityLabel": "Critical|High|Medium|Low",
   "category": "External|Internal",
-  "emailType": "<one of the types listed above>",
-  "summary": "<2-3 sentence plain English summary — NOT raw email text>",
-  "tasks": [
-    {
-      "title": "<summarized actionable task — NOT raw email text>",
-      "due": "<deadline or 'This week' or 'ASAP'>",
-      "context": "<one sentence explaining relevance>",
-      "suggestedAction": "<for Internal only: email-draft|ppt|quote|proposal|contract-draft|citation|report|spreadsheet|null>"
-    }
-  ]
-}
-
-If no tasks, return empty array for tasks.`;
+  "emailType": "<one of the types above>",
+  "tasks": "<context summary + numbered action items as described above>",
+  "suggestedAction": "<for Internal: deliverable types comma-separated | for External: empty string>"
+}`;
 
 // ─── IMAP Client ─────────────────────────────────────────────────────────────
 
@@ -392,7 +380,7 @@ function extractDomain(from: string): string {
   return match ? match[1].trim() : "unknown";
 }
 
-const CSV_HEADER = "EmailDate,ProcessedDate,From,Company,Subject,Priority,Category,EmailType,Task,Due,SuggestedAction,Status,ThreadId\n";
+const CSV_HEADER = "From,Subject,Tasks,SuggestedAction\n";
 
 function ensureCsvHeader(): void {
   if (!fs.existsSync(EMAIL_CSV_PATH)) {
@@ -410,7 +398,8 @@ function ensureCsvHeader(): void {
   const isHeaderLine = (l: string) =>
     l.startsWith("Date,From,") ||
     l.startsWith("EmailDate,ProcessedDate,") ||
-    l.startsWith("EmailDate,From,");
+    l.startsWith("EmailDate,From,") ||
+    l.startsWith("From,Subject,Tasks,");
   const dataLines = lines.filter((l) => !isHeaderLine(l));
   const cleaned = CSV_HEADER.trimEnd() + "\n" + dataLines.join("\n");
   if (cleaned !== content) {
@@ -445,42 +434,15 @@ function parseCsvLine(line: string): string[] {
 
 function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   ensureCsvHeader();
-  let emailDate = "";
-  if (email.date) {
-    try {
-      const d = new Date(email.date);
-      if (!isNaN(d.getTime())) emailDate = d.toISOString().slice(0, 10);
-    } catch { /* malformed date header */ }
-  }
-  const processedDate = new Date().toISOString().slice(0, 10);
-  const from = csvEscape(email.from);
-  const company = csvEscape(extractDomain(email.from));
+  const from = csvEscape(extractSenderName(email.from));
   const subject = csvEscape(decodeMimeHeader(email.subject));
-  const threadId = csvEscape(extractThreadId(email));
 
-  if (analysis.tasks.length === 0) {
-    const row = [
-      emailDate, processedDate, from, company, subject,
-      analysis.priorityLabel, analysis.category,
-      csvEscape(analysis.emailType),
-      csvEscape(analysis.summary), csvEscape(""), csvEscape(""),
-      "No action", threadId
-    ].join(",");
-    fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
-    return;
-  }
-
-  for (const task of analysis.tasks) {
-    const row = [
-      emailDate, processedDate, from, company, subject,
-      analysis.priorityLabel, analysis.category,
-      csvEscape(analysis.emailType),
-      csvEscape(task.title), csvEscape(task.due),
-      csvEscape(task.suggestedAction ?? ""),
-      csvEscape("Pending"), threadId
-    ].join(",");
-    fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
-  }
+  const row = [
+    from, subject,
+    csvEscape(analysis.tasks),
+    csvEscape(analysis.suggestedAction),
+  ].join(",");
+  fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
 }
 
 // ─── LLM Analysis ───────────────────────────────────────────────────────────
@@ -635,33 +597,26 @@ const handler: HookHandler = async (event) => {
 
         // Enforce: no suggested actions for external emails
         if (analysis.category === "External") {
-          for (const task of analysis.tasks) {
-            task.suggestedAction = undefined;
-          }
+          analysis.suggestedAction = "";
         }
 
-        // Every email gets logged to CSV — no dedup
+        // Every email gets logged to CSV
         appendTasksToCsv(email, analysis);
 
-        const taskCount = analysis.tasks.length;
         console.log(
-          `[email-task-extractor] ${priorityEmoji(analysis.priorityLabel)} ${analysis.priorityLabel} [${analysis.category}] [${analysis.emailType}]: "${email.subject}" — ${taskCount} task(s)`
+          `[email-task-extractor] ${priorityEmoji(analysis.priorityLabel)} ${analysis.priorityLabel} [${analysis.category}] [${analysis.emailType}]: "${email.subject}"`
         );
 
         // Surface Critical/High emails immediately
         if (analysis.priorityLabel === "Critical" || analysis.priorityLabel === "High") {
           const senderName = extractSenderName(email.from);
-          const taskLines = analysis.tasks.map((t) =>
-            `  → ${t.title}${t.due !== "None stated" ? ` (Due: ${t.due})` : ""}${t.suggestedAction ? ` [${t.suggestedAction}]` : ""}`
-          ).join("\n");
-
           const emoji = analysis.priorityLabel === "Critical" ? "🔴" : "🟠";
           event.messages.push(
             `${emoji} *${analysis.priorityLabel} email [${analysis.emailType}]:*\n` +
             `*From:* ${senderName} (${analysis.category})\n` +
             `*Subject:* ${email.subject}\n\n` +
-            `${analysis.summary}\n\n` +
-            (taskLines ? `*Tasks:*\n${taskLines}` : "No tasks extracted.")
+            `${analysis.tasks}` +
+            (analysis.suggestedAction ? `\n\n*Suggested:* ${analysis.suggestedAction}` : "")
           );
         }
       }

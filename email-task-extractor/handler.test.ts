@@ -317,11 +317,8 @@ describe("appendTasksToCsv", () => {
       priorityLabel: "High" as const,
       category: "External" as const,
       emailType: "contract-discussion",
-      summary: "Client requesting contract renewal review",
-      tasks: [
-        { title: "Review renewal terms and prepare response", due: "Friday", context: "Q3 renewal" },
-        { title: "Update pricing sheet for client", due: "ASAP", context: "Updated rates needed" },
-      ],
+      tasks: "Client requesting contract renewal review. 1. Review renewal terms (Due: Friday) 2. Update pricing sheet (Due: ASAP)",
+      suggestedAction: "",
     };
 
     appendTasksToCsv(email, analysis);
@@ -329,18 +326,13 @@ describe("appendTasksToCsv", () => {
     const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
     const lines = content.trim().split("\n");
 
-    // Header + 2 task rows
-    expect(lines.length).toBe(3);
-    expect(lines[0]).toContain("EmailDate,ProcessedDate,From,Company,Subject,Priority,Category,EmailType,Task");
-    expect(lines[0]).toContain("ThreadId");
-    // Verify EmailDate comes from the email's Date header
-    expect(lines[1]).toContain("2026-03-20");
-    expect(lines[1]).toContain("High");
-    expect(lines[1]).toContain("External");
-    expect(lines[1]).toContain("contract-discussion");
+    // Header + 1 row per email
+    expect(lines.length).toBe(2);
+    expect(lines[0]).toBe("From,Subject,Tasks,SuggestedAction");
+    expect(lines[1]).toContain("John");
+    expect(lines[1]).toContain("Renewal discussion");
     expect(lines[1]).toContain("Review renewal terms");
-    expect(lines[1]).toContain("Pending");
-    expect(lines[2]).toContain("Update pricing sheet");
+    expect(lines[1]).toContain("Update pricing sheet");
   });
 
   it("appends duplicate emails without dedup (every email gets a row)", () => {
@@ -358,8 +350,8 @@ describe("appendTasksToCsv", () => {
       priorityLabel: "High" as const,
       category: "External" as const,
       emailType: "follow-up",
-      summary: "Follow-up on previous discussion",
-      tasks: [{ title: "Respond to follow-up", due: "ASAP", context: "Client waiting" }],
+      tasks: "Follow-up on previous discussion. 1. Respond to follow-up (Due: ASAP)",
+      suggestedAction: "",
     };
 
     // Append same email twice — both should appear
@@ -387,15 +379,15 @@ describe("appendTasksToCsv", () => {
       priorityLabel: "Low" as const,
       category: "External" as const,
       emailType: "information-sharing",
-      summary: "Weekly newsletter, no action needed",
-      tasks: [],
+      tasks: "Weekly newsletter with company updates. No action needed.",
+      suggestedAction: "",
     };
 
     appendTasksToCsv(email, analysis);
 
     const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
-    expect(content).toContain("No action");
-    expect(content).toContain("information-sharing");
+    expect(content).toContain("Weekly newsletter");
+    expect(content).toContain("news");
   });
 
   it("includes thread ID for threaded emails", () => {
@@ -415,14 +407,16 @@ describe("appendTasksToCsv", () => {
       priorityLabel: "High" as const,
       category: "External" as const,
       emailType: "follow-up",
-      summary: "Follow-up on contract renewal thread",
-      tasks: [{ title: "Review and respond to follow-up", due: "Today", context: "Client waiting" }],
+      tasks: "Follow-up on contract renewal thread. 1. Review and respond to follow-up (Due: Today)",
+      suggestedAction: "",
     };
 
     appendTasksToCsv(email, analysis);
 
     const content = fs.readFileSync(EMAIL_CSV_PATH, "utf-8");
-    expect(content).toContain("<original@bigcorp.com>");
+    expect(content).toContain("Jane");
+    expect(content).toContain("Re: Contract renewal");
+    expect(content).toContain("Review and respond");
   });
 });
 
@@ -448,44 +442,35 @@ describe("handler", () => {
 // ─── Guardrail rules verification ───────────────────────────────────────────
 
 describe("guardrail rules", () => {
-  it("external emails have suggestedAction stripped", () => {
+  it("external emails have suggestedAction cleared", () => {
     const analysis = {
       priorityLabel: "High" as const,
       category: "External" as const,
       emailType: "contract-discussion",
-      summary: "Client email",
-      tasks: [
-        { title: "Review contract", due: "Friday", context: "Q3", suggestedAction: "email-draft" },
-        { title: "Send pricing", due: "ASAP", context: "Rates", suggestedAction: "proposal" },
-      ],
+      tasks: "Review contract",
+      suggestedAction: "email-draft",
     };
 
     if (analysis.category === "External") {
-      for (const task of analysis.tasks) {
-        task.suggestedAction = undefined;
-      }
+      analysis.suggestedAction = "";
     }
 
-    expect(analysis.tasks[0].suggestedAction).toBeUndefined();
-    expect(analysis.tasks[1].suggestedAction).toBeUndefined();
+    expect(analysis.suggestedAction).toBe("");
   });
 
   it("internal emails keep suggestedAction", () => {
     const analysis = {
       category: "Internal" as const,
       emailType: "task-assignment",
-      tasks: [
-        { title: "Draft response", due: "Today", context: "Manager request", suggestedAction: "email-draft" },
-      ],
+      tasks: "Draft response to manager",
+      suggestedAction: "email-draft",
     };
 
     if (analysis.category === "External") {
-      for (const task of analysis.tasks) {
-        task.suggestedAction = undefined;
-      }
+      analysis.suggestedAction = "";
     }
 
-    expect(analysis.tasks[0].suggestedAction).toBe("email-draft");
+    expect(analysis.suggestedAction).toBe("email-draft");
   });
 
   it("external emails always get High priority", () => {
@@ -528,10 +513,8 @@ describe("source code invariants", () => {
     expect(source).not.toContain("wordOverlap");
   });
 
-  it("CSV header includes EmailDate, ProcessedDate, EmailType and ThreadId", () => {
-    expect(source).toContain("EmailDate,ProcessedDate");
-    expect(source).toContain("EmailType");
-    expect(source).toContain("ThreadId");
+  it("CSV header is From,Subject,Tasks,SuggestedAction", () => {
+    expect(source).toContain("From,Subject,Tasks,SuggestedAction");
   });
 
   it("fetches In-Reply-To and References headers for thread detection", () => {
