@@ -36,7 +36,6 @@ interface EmailAnalysis {
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-haiku-4-5-20251001";
 const BATCH_SIZE = 10;
-const DAILY_LIMIT = 100;
 
 const EMAIL_CSV_PATH = path.join(
   process.env.HOME ?? "~",
@@ -48,12 +47,6 @@ const UID_STATE_PATH = path.join(
   ".openclaw",
   "state",
   "gmail-uid-state.json"
-);
-const DAILY_COUNT_PATH = path.join(
-  process.env.HOME ?? "~",
-  ".openclaw",
-  "state",
-  "gmail-daily-count.json"
 );
 
 const IMAP_HOST = "imap.gmail.com";
@@ -191,29 +184,6 @@ function saveUidState(state: UidState): void {
   fs.writeFileSync(UID_STATE_PATH, JSON.stringify(state), "utf-8");
 }
 
-// ─── Daily Rate Limit ────────────────────────────────────────────────────────
-
-interface DailyCount {
-  date: string;
-  count: number;
-}
-
-function loadDailyCount(): DailyCount {
-  const today = new Date().toISOString().slice(0, 10);
-  try {
-    if (fs.existsSync(DAILY_COUNT_PATH)) {
-      const data = JSON.parse(fs.readFileSync(DAILY_COUNT_PATH, "utf-8")) as DailyCount;
-      if (data.date === today) return data;
-    }
-  } catch { /* new day */ }
-  return { date: today, count: 0 };
-}
-
-function saveDailyCount(state: DailyCount): void {
-  const dir = path.dirname(DAILY_COUNT_PATH);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(DAILY_COUNT_PATH, JSON.stringify(state), "utf-8");
-}
 
 // ─── Fetch emails ────────────────────────────────────────────────────────────
 
@@ -237,15 +207,6 @@ async function fetchNewEmails(envOverrides?: Record<string, string>): Promise<Em
     console.warn("[email-task-extractor] Missing GMAIL_ACCOUNT or GMAIL_APP_PASSWORD");
     return [];
   }
-
-  // Check daily rate limit
-  const dailyState = loadDailyCount();
-  if (dailyState.count >= DAILY_LIMIT) {
-    console.log("[email-task-extractor] Daily rate limit reached (100 emails)");
-    return [];
-  }
-  const remaining = DAILY_LIMIT - dailyState.count;
-  const batchSize = Math.min(BATCH_SIZE, remaining);
 
   const uidState = loadUidState();
   const emails: EmailPayload[] = [];
@@ -284,7 +245,7 @@ async function fetchNewEmails(envOverrides?: Record<string, string>): Promise<Em
     uids = uids.filter((uid) => uid > lastUid);
     // Sort ascending (oldest first) and take batch
     uids.sort((a, b) => a - b);
-    const batch = uids.slice(0, batchSize);
+    const batch = uids.slice(0, BATCH_SIZE);
 
     for (const uid of batch) {
       try {
@@ -306,10 +267,6 @@ async function fetchNewEmails(envOverrides?: Record<string, string>): Promise<Em
       const maxUid = Math.max(...batch);
       saveUidState({ uidValidity, lastUid: maxUid });
     }
-
-    // Update daily count
-    dailyState.count += emails.length;
-    saveDailyCount(dailyState);
 
     await imapCommand(socket, "A099", "LOGOUT");
   } catch (err) {
@@ -488,9 +445,13 @@ function parseCsvLine(line: string): string[] {
 
 function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
   ensureCsvHeader();
-  const emailDate = email.date
-    ? new Date(email.date).toISOString().slice(0, 10)
-    : "";
+  let emailDate = "";
+  if (email.date) {
+    try {
+      const d = new Date(email.date);
+      if (!isNaN(d.getTime())) emailDate = d.toISOString().slice(0, 10);
+    } catch { /* malformed date header */ }
+  }
   const processedDate = new Date().toISOString().slice(0, 10);
   const from = csvEscape(email.from);
   const company = csvEscape(extractDomain(email.from));
@@ -554,6 +515,34 @@ async function analyzeEmail(email: EmailPayload, apiKey: string): Promise<EmailA
       }),
     });
 
+    // Retry once on 429 rate limit
+    if (response.status === 429) {
+      console.warn("[email-task-extractor] Rate limited (429), waiting 10s and retrying...");
+      await new Promise((r) => setTimeout(r, 10000));
+      const retry = await fetch(ANTHROPIC_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          max_tokens: 1000,
+          system: GUARDRAIL_SYSTEM,
+          messages: [{ role: "user", content: `${ANALYSIS_PROMPT}\n\nEMAIL:\n${emailText}` }],
+        }),
+      });
+      if (!retry.ok) {
+        console.error(`[email-task-extractor] API error after retry: ${retry.status}`);
+        return null;
+      }
+      const retryData = await retry.json() as { content: Array<{ text: string }> };
+      const retryText = retryData.content?.map((b) => b.text || "").join("") ?? "";
+      const retryClean = retryText.replace(/```json|```/g, "").trim();
+      return JSON.parse(retryClean) as EmailAnalysis;
+    }
+
     if (!response.ok) {
       console.error(`[email-task-extractor] API error: ${response.status}`);
       return null;
@@ -562,7 +551,13 @@ async function analyzeEmail(email: EmailPayload, apiKey: string): Promise<EmailA
     const data = await response.json() as { content: Array<{ text: string }> };
     const text = data.content?.map((b) => b.text || "").join("") ?? "";
     const clean = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean) as EmailAnalysis;
+    // Extract JSON from response — handle trailing text after valid JSON
+    const jsonMatch = clean.match(/^\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("[email-task-extractor] No valid JSON found in response");
+      return null;
+    }
+    return JSON.parse(jsonMatch[0]) as EmailAnalysis;
   } catch (err) {
     console.error(
       "[email-task-extractor] Analysis failed:",
@@ -584,8 +579,8 @@ const handler: HookHandler = async (event) => {
   // Throttle bootstrap events: only poll if 10+ minutes since last run
   if (isBootstrap) {
     try {
-      if (fs.existsSync(DAILY_COUNT_PATH)) {
-        const stat = fs.statSync(DAILY_COUNT_PATH);
+      if (fs.existsSync(UID_STATE_PATH)) {
+        const stat = fs.statSync(UID_STATE_PATH);
         if (Date.now() - stat.mtimeMs < 10 * 60 * 1000) return;
       }
     } catch { /* first run */ }
@@ -624,7 +619,7 @@ const handler: HookHandler = async (event) => {
       for (let i = 0; i < emails.length; i++) {
         const email = emails[i];
         // Delay between API calls to avoid 429 rate limits
-        if (i > 0) await new Promise((r) => setTimeout(r, 2000));
+        if (i > 0) await new Promise((r) => setTimeout(r, 3000));
         const isInternal = isInternalEmail(email.from);
         const analysis = await analyzeEmail(email, apiKey);
         if (!analysis) continue;
@@ -697,12 +692,8 @@ export const _testExports = {
   extractThreadId,
   loadUidState,
   saveUidState,
-  loadDailyCount,
-  saveDailyCount,
   INTERNAL_DOMAINS,
   EMAIL_CSV_PATH,
   UID_STATE_PATH,
-  DAILY_COUNT_PATH,
   BATCH_SIZE,
-  DAILY_LIMIT,
 };

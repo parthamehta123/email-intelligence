@@ -18,13 +18,9 @@ const {
   extractThreadId,
   loadUidState,
   saveUidState,
-  loadDailyCount,
-  saveDailyCount,
   EMAIL_CSV_PATH,
   UID_STATE_PATH,
-  DAILY_COUNT_PATH,
   BATCH_SIZE,
-  DAILY_LIMIT,
 } = _testExports;
 
 // ─── Test Data ───────────────────────────────────────────────────────────────
@@ -279,43 +275,11 @@ describe("UID state persistence", () => {
   });
 });
 
-// ─── Daily Rate Limit ────────────────────────────────────────────────────────
+// ─── Batch Size ─────────────────────────────────────────────────────────────
 
-describe("daily rate limit", () => {
-  let originalDailyCount: string | undefined;
-
-  beforeEach(() => {
-    if (fs.existsSync(DAILY_COUNT_PATH)) {
-      originalDailyCount = fs.readFileSync(DAILY_COUNT_PATH, "utf-8");
-    }
-  });
-
-  afterEach(() => {
-    if (originalDailyCount !== undefined) {
-      fs.writeFileSync(DAILY_COUNT_PATH, originalDailyCount, "utf-8");
-    }
-  });
-
-  it("loadDailyCount returns today's date with 0 count on fresh start", () => {
-    const state = loadDailyCount();
-    expect(state.date).toBe(new Date().toISOString().slice(0, 10));
-    expect(state.count).toBeGreaterThanOrEqual(0);
-  });
-
-  it("saveDailyCount and loadDailyCount round-trip correctly", () => {
-    const today = new Date().toISOString().slice(0, 10);
-    saveDailyCount({ date: today, count: 42 });
-    const state = loadDailyCount();
-    expect(state.date).toBe(today);
-    expect(state.count).toBe(42);
-  });
-
+describe("batch size", () => {
   it("BATCH_SIZE is 10", () => {
     expect(BATCH_SIZE).toBe(10);
-  });
-
-  it("DAILY_LIMIT is 100", () => {
-    expect(DAILY_LIMIT).toBe(100);
   });
 });
 
@@ -553,8 +517,8 @@ describe("source code invariants", () => {
     expect(source).toContain("BATCH_SIZE = 10");
   });
 
-  it("daily limit is 100", () => {
-    expect(source).toContain("DAILY_LIMIT = 100");
+  it("does not contain daily limit", () => {
+    expect(source).not.toContain("DAILY_LIMIT");
   });
 
   it("does not contain old dedup functions", () => {
