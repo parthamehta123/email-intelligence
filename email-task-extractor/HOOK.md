@@ -1,47 +1,42 @@
 ---
 name: email-task-extractor
-description: "Polls Gmail via IMAP, processes ALL emails (no dedup), categorizes External/Internal, extracts summarized tasks, classifies email type via LLM, tracks threads, writes to CSV. Batches of 10, rate-limited to 100/day. Never sends or modifies anything."
+description: "Polls Gmail via IMAP, reads every email, uses Claude AI to extract context and tasks, writes clean 4-column CSV (From, Subject, Tasks, SuggestedAction). Batches of 10. Never sends or modifies anything."
 metadata: {"openclaw":{"emoji":"📨","events":["cron","agent:bootstrap"],"requires":{"env":["GMAIL_ACCOUNT","GMAIL_APP_PASSWORD","ANTHROPIC_API_KEY"]}}}
 ---
 
 # Email Task Extractor Hook
 
-Connects to Gmail via IMAP, fetches ALL emails (no lookback limit, no dedup), sends each to Claude Haiku for analysis, and writes summarized tasks to `~/Documents/email-tasks.csv`.
+Connects to Gmail via IMAP, fetches every email, uses Claude Haiku to analyze and summarize, writes one row per email to `~/Documents/email-tasks.csv`.
 
 Fires on cron schedule (every 10 minutes) and on agent bootstrap (throttled).
 
 ## What It Does
 
 1. Connects to Gmail IMAP with an App Password
-2. Fetches emails incrementally using UID tracking (10 per batch, 100/day max)
-3. Every email gets processed — no content dedup, no skipping
-4. Claude Haiku analyzes each email: categorizes, classifies type, extracts summarized tasks
-5. External emails: always High priority, tasks only, no suggested actions
-6. Internal emails: priority varies (default Medium), tasks + suggested action types
-7. Threads detected via In-Reply-To/References headers and linked by ThreadId
-8. Results written to CSV with proper AI-summarized tasks (not raw email text)
+2. Fetches emails incrementally using UID tracking (10 per batch, no daily limit)
+3. Claude Haiku reasons step-by-step about each email: who sent it, what they need, how urgent
+4. External emails: LLM-driven priority (Critical → Low based on business impact), tasks only, no suggested actions
+5. Internal emails: priority varies (default Medium), tasks + suggested deliverable type
+6. One row per email with context summary + numbered action items
+7. Results written to 4-column CSV: From, Subject, Tasks, SuggestedAction
 
-## Priority Rules
+## Priority (LLM-Driven)
 
-- **External**: Always High
-- **Internal**: Default Medium, raised to High/Critical only for clear urgency
-
-## Rate Limiting
-
-- **Batch size**: 10 emails per cron run
-- **Daily limit**: 100 emails per day (resets at midnight)
-- **No lookback limit**: processes all emails including historical ones
+- **Critical**: Client escalation, SLA breach, revenue at risk
+- **High**: Direct client request, proposal needed, billing action required
+- **Medium**: Vendor notification needing review, internal default
+- **Low**: Newsletter, auto-reply, verification code, marketing
 
 ## CSV Columns
 
-Date, From, Company, Subject, Priority, Category, EmailType, Task, Due, SuggestedAction, Status, ThreadId
+From, Subject, Tasks, SuggestedAction
 
 ## Guardrails
 
-- Read only. Never sends, replies, archives, or modifies anything.
-- External emails: extract tasks only — never draft anything
-- Internal emails: extract tasks + tag what deliverable type is needed
-- AI summarizes tasks clearly — never dumps raw email text into CSV
+- Read only. Never sends, replies, archives, or modifies anything
+- External emails: tasks only — SuggestedAction forcefully cleared in code
+- Internal emails: tasks + deliverable type (email-draft, ppt, proposal, etc.)
+- AI summarizes — never dumps raw email text
 
 ## Setup
 
