@@ -47,9 +47,22 @@ openclaw hooks enable email-task-extractor email-briefing
 openclaw gateway restart
 ```
 
+## 7. WhatsApp notifications (optional)
+
+Get a summary on WhatsApp every time emails are processed:
+
+```bash
+openclaw cron add --cron "*/10 * * * *" --name "email-poll" \
+  --message "email poll" --session isolated \
+  --announce --to "+91XXXXXXXXXX" --light-context
+```
+
+Replace `+91XXXXXXXXXX` with the recipient's phone number (E.164 format with country code).
+
 ## Done
 
 - Emails processed every 10 minutes (10 per batch)
 - Output: `~/Documents/email-tasks.csv`
 - 4 columns: From, Subject, Tasks, SuggestedAction
 - Open in Excel — scan, understand, act
+- WhatsApp notification after each batch (if configured)

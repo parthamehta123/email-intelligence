@@ -594,6 +594,7 @@ const handler: HookHandler = async (event) => {
         console.log(`[email-task-extractor] Processing ${emails.length} email(s) (batch of ${BATCH_SIZE})`);
       }
 
+      const batchSummaryLines: string[] = [];
       for (let i = 0; i < emails.length; i++) {
         const email = emails[i];
         // Delay between API calls to avoid 429 rate limits
@@ -621,18 +622,22 @@ const handler: HookHandler = async (event) => {
           `[email-task-extractor] ${priorityEmoji(analysis.priorityLabel)} ${analysis.priorityLabel} [${analysis.category}] [${analysis.emailType}]: "${email.subject}"`
         );
 
-        // Surface Critical/High emails immediately
-        if (analysis.priorityLabel === "Critical" || analysis.priorityLabel === "High") {
+        // Only notify for external emails that are actual client/vendor communication (not noise)
+        const SKIP_TYPES = new Set(["newsletter", "auto-reply", "calendar-invite", "information-sharing"]);
+        if (analysis.category === "External" && !SKIP_TYPES.has(analysis.emailType)) {
           const senderName = extractSenderName(email.from);
-          const emoji = analysis.priorityLabel === "Critical" ? "🔴" : "🟠";
-          event.messages.push(
-            `${emoji} *${analysis.priorityLabel} email [${analysis.emailType}]:*\n` +
-            `*From:* ${senderName} (${analysis.category})\n` +
-            `*Subject:* ${email.subject}\n\n` +
-            `${analysis.tasks}` +
-            (analysis.suggestedAction ? `\n\n*Suggested:* ${analysis.suggestedAction}` : "")
+          batchSummaryLines.push(
+            `*${senderName}* — ${email.subject}\n${analysis.tasks.split("\n")[0]}`
           );
         }
+      }
+
+      // Send notification (delivered via WhatsApp/Telegram if cron is configured with --announce --to)
+      if (batchSummaryLines.length > 0) {
+        event.messages.push(
+          `📬 *${batchSummaryLines.length} email(s) need attention:*\n\n` +
+          batchSummaryLines.join("\n\n")
+        );
       }
     } catch (err) {
       console.error(
