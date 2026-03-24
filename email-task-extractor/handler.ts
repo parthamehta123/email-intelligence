@@ -26,6 +26,19 @@ interface EmailAnalysis {
   suggestedAction: string;
 }
 
+interface UserConfig {
+  csv: {
+    includeInternal: boolean;
+    includeExternal: boolean;
+  };
+  notify: {
+    enabled: boolean;
+    categories: ("External" | "Internal")[];
+    skipTypes: string[];
+  };
+  internalDomains: string[];
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
@@ -44,15 +57,44 @@ const UID_STATE_PATH = path.join(
   "gmail-uid-state.json"
 );
 
+const USER_CONFIG_PATH = path.join(
+  process.env.HOME ?? "~",
+  ".openclaw",
+  "email-intelligence.json"
+);
+
 const IMAP_HOST = "imap.gmail.com";
 const IMAP_PORT = 993;
 
-// Known internal domains
-const INTERNAL_DOMAINS = [
+// Default internal domains (overridden by user config)
+const DEFAULT_INTERNAL_DOMAINS = [
   "clarivate.com",
   "clarivate.io",
-  // Add other internal domains here
 ];
+
+const DEFAULT_USER_CONFIG: UserConfig = {
+  csv: { includeInternal: true, includeExternal: true },
+  notify: {
+    enabled: true,
+    categories: ["External"],
+    skipTypes: ["newsletter", "auto-reply", "calendar-invite", "information-sharing"],
+  },
+  internalDomains: DEFAULT_INTERNAL_DOMAINS,
+};
+
+function loadUserConfig(): UserConfig {
+  try {
+    if (fs.existsSync(USER_CONFIG_PATH)) {
+      const raw = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf-8"));
+      return {
+        csv: { ...DEFAULT_USER_CONFIG.csv, ...raw.csv },
+        notify: { ...DEFAULT_USER_CONFIG.notify, ...raw.notify },
+        internalDomains: raw.internalDomains ?? DEFAULT_USER_CONFIG.internalDomains,
+      };
+    }
+  } catch { /* use defaults */ }
+  return DEFAULT_USER_CONFIG;
+}
 
 // ─── Analysis Prompts ─────────────────────────────────────────────────────────
 
@@ -380,8 +422,9 @@ function priorityEmoji(label: string): string {
   return map[label] ?? "⚪";
 }
 
-function isInternalEmail(from: string): boolean {
-  return INTERNAL_DOMAINS.some((domain) =>
+function isInternalEmail(from: string, domains?: string[]): boolean {
+  const domainList = domains ?? DEFAULT_INTERNAL_DOMAINS;
+  return domainList.some((domain) =>
     from.toLowerCase().includes(domain)
   );
 }
@@ -594,12 +637,13 @@ const handler: HookHandler = async (event) => {
         console.log(`[email-task-extractor] Processing ${emails.length} email(s) (batch of ${BATCH_SIZE})`);
       }
 
+      const userConfig = loadUserConfig();
       const batchSummaryLines: string[] = [];
       for (let i = 0; i < emails.length; i++) {
         const email = emails[i];
         // Delay between API calls to avoid 429 rate limits
         if (i > 0) await new Promise((r) => setTimeout(r, 3000));
-        const isInternal = isInternalEmail(email.from);
+        const isInternal = isInternalEmail(email.from, userConfig.internalDomains);
         const analysis = await analyzeEmail(email, apiKey);
         if (!analysis) continue;
 
@@ -615,20 +659,28 @@ const handler: HookHandler = async (event) => {
           analysis.suggestedAction = "";
         }
 
-        // Every email gets logged to CSV
-        appendTasksToCsv(email, analysis);
+        // Write to CSV based on user config
+        const shouldWriteCsv =
+          (analysis.category === "Internal" && userConfig.csv.includeInternal) ||
+          (analysis.category === "External" && userConfig.csv.includeExternal);
+        if (shouldWriteCsv) {
+          appendTasksToCsv(email, analysis);
+        }
 
         console.log(
           `[email-task-extractor] ${priorityEmoji(analysis.priorityLabel)} ${analysis.priorityLabel} [${analysis.category}] [${analysis.emailType}]: "${email.subject}"`
         );
 
-        // Only notify for external emails that are actual client/vendor communication (not noise)
-        const SKIP_TYPES = new Set(["newsletter", "auto-reply", "calendar-invite", "information-sharing"]);
-        if (analysis.category === "External" && !SKIP_TYPES.has(analysis.emailType)) {
-          const senderName = extractSenderName(email.from);
-          batchSummaryLines.push(
-            `*${senderName}* — ${email.subject}\n${analysis.tasks.split("\n")[0]}`
-          );
+        // Build notification based on user config
+        if (userConfig.notify.enabled) {
+          const skipTypes = new Set(userConfig.notify.skipTypes);
+          const notifyCategories = new Set(userConfig.notify.categories);
+          if (notifyCategories.has(analysis.category) && !skipTypes.has(analysis.emailType)) {
+            const senderName = extractSenderName(email.from);
+            batchSummaryLines.push(
+              `*${senderName}* — ${email.subject}\n${analysis.tasks.split("\n")[0]}`
+            );
+          }
         }
       }
 
@@ -666,7 +718,9 @@ export const _testExports = {
   extractThreadId,
   loadUidState,
   saveUidState,
-  INTERNAL_DOMAINS,
+  DEFAULT_INTERNAL_DOMAINS,
+  loadUserConfig,
+  USER_CONFIG_PATH,
   EMAIL_CSV_PATH,
   UID_STATE_PATH,
   BATCH_SIZE,

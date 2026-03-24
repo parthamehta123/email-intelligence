@@ -1,0 +1,12 @@
+{
+  "csv": {
+    "includeInternal": true,
+    "includeExternal": true
+  },
+  "notify": {
+    "enabled": true,
+    "categories": ["External"],
+    "skipTypes": ["newsletter", "auto-reply", "calendar-invite", "information-sharing"]
+  },
+  "internalDomains": ["yourcompany.com"]
+}

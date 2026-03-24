@@ -34,11 +34,34 @@ cp -r gmail-intel ~/.openclaw/skills/
 }
 ```
 
-## 5. Edit your internal domains
+## 5. Configure preferences
 
-```typescript
-const INTERNAL_DOMAINS = ["yourcompany.com"];
+Copy the example config and edit:
+
+```bash
+cp email-intelligence.example.json ~/.openclaw/email-intelligence.json
 ```
+
+Edit `~/.openclaw/email-intelligence.json`:
+
+```json
+{
+  "csv": {
+    "includeInternal": true,
+    "includeExternal": true
+  },
+  "notify": {
+    "enabled": true,
+    "categories": ["External"],
+    "skipTypes": ["newsletter", "auto-reply", "calendar-invite", "information-sharing"]
+  },
+  "internalDomains": ["yourcompany.com"]
+}
+```
+
+- `csv` — choose which emails appear in the spreadsheet
+- `notify` — choose which emails trigger WhatsApp/Telegram notifications
+- `internalDomains` — your company's email domains
 
 ## 6. Enable and restart
 

@@ -104,12 +104,26 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-### 5. Configure internal domains
+### 5. Configure preferences
 
-Edit `~/.openclaw/hooks/email-task-extractor/handler.ts`:
+Copy the example config:
 
-```typescript
-const INTERNAL_DOMAINS = ["yourcompany.com"];
+```bash
+cp email-intelligence.example.json ~/.openclaw/email-intelligence.json
+```
+
+Edit `~/.openclaw/email-intelligence.json`:
+
+```json
+{
+  "csv": { "includeInternal": true, "includeExternal": true },
+  "notify": {
+    "enabled": true,
+    "categories": ["External"],
+    "skipTypes": ["newsletter", "auto-reply", "calendar-invite", "information-sharing"]
+  },
+  "internalDomains": ["yourcompany.com"]
+}
 ```
 
 ### 6. Enable and restart

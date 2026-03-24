@@ -18,6 +18,9 @@ const {
   extractThreadId,
   loadUidState,
   saveUidState,
+  DEFAULT_INTERNAL_DOMAINS,
+  loadUserConfig,
+  USER_CONFIG_PATH,
   EMAIL_CSV_PATH,
   UID_STATE_PATH,
   BATCH_SIZE,
@@ -280,6 +283,30 @@ describe("UID state persistence", () => {
 describe("batch size", () => {
   it("BATCH_SIZE is 10", () => {
     expect(BATCH_SIZE).toBe(10);
+  });
+});
+
+// ─── User Config ────────────────────────────────────────────────────────────
+
+describe("loadUserConfig", () => {
+  it("returns defaults when config file does not exist", () => {
+    const config = loadUserConfig();
+    expect(config.csv.includeInternal).toBe(true);
+    expect(config.csv.includeExternal).toBe(true);
+    expect(config.notify.enabled).toBe(true);
+    expect(config.notify.categories).toContain("External");
+    expect(config.notify.skipTypes).toContain("newsletter");
+    expect(config.internalDomains.length).toBeGreaterThan(0);
+  });
+
+  it("isInternalEmail uses custom domains when provided", () => {
+    expect(isInternalEmail("john@acme.com", ["acme.com"])).toBe(true);
+    expect(isInternalEmail("john@other.com", ["acme.com"])).toBe(false);
+  });
+
+  it("isInternalEmail uses default domains when none provided", () => {
+    expect(isInternalEmail("john@clarivate.com")).toBe(true);
+    expect(isInternalEmail("john@external.com")).toBe(false);
   });
 });
 
