@@ -111,6 +111,14 @@ Return structured JSON only.`;
 
 const ANALYSIS_PROMPT = `You are analyzing an email for a senior account manager at Clarivate (analytics/data company). Think carefully step-by-step.
 
+STEP 0 — FIND THE REAL MESSAGE (do this FIRST, before anything else):
+Emails often contain noise mixed with the real message. Before analyzing, mentally separate:
+- The ACTUAL message the sender wrote (usually at the top, before any forwarded/appended content)
+- Noise to IGNORE: email signatures, legal disclaimers, forwarded newsletters, appended promotional content, bootcamp notifications, auto-appended footers, mailing list content, unsubscribe links
+- If the email subject says one thing (e.g., "strat meeting") but the body contains unrelated appended content (e.g., a bootcamp notification), the SUBJECT LINE tells you the real intent — the appended content is noise
+- Thread history: read it for context but focus your analysis on the most recent message
+- If there's a short personal message at the top and a long appended/forwarded block below, the short message IS the email — analyze that
+
 STEP 1 — CATEGORY:
 - "External": from outside Clarivate (clients, prospects, vendors, partners, automated services, newsletters)
 - "Internal": from inside Clarivate (colleagues, managers, leadership)
@@ -126,11 +134,11 @@ Think: "Does this email require the account manager to personally act? How soon?
 For INTERNAL emails:
 - Default "Medium". Raise to "High"/"Critical" only for clear urgency (deadline, escalation, executive request). Lower to "Low" for pure FYI.
 
-STEP 3 — EMAIL TYPE (pick one):
+STEP 3 — EMAIL TYPE (pick one based on the REAL message, not noise):
 "client-request", "client-escalation", "meeting-request", "task-assignment", "follow-up", "status-update", "escalation", "approval-request", "information-sharing", "introduction", "feedback-request", "contract-discussion", "proposal-request", "invoice-billing", "technical-issue", "newsletter", "auto-reply", "calendar-invite", "vendor-notification", "security-alert", "other"
 
 STEP 4 — TASKS (this is the most important field):
-Read the ENTIRE email carefully, including any thread/chain history. Then produce a single text block:
+Based on the REAL message (not noise), produce a single text block:
 
 For HIGH-PRIORITY external emails (client requests, escalations, proposals, contracts):
 - Start with 2-3 sentences explaining the full context: who is asking, what they need, why, any history
@@ -143,6 +151,8 @@ For LOW-PRIORITY external emails (newsletters, auto-replies, notifications):
 - Do NOT pad with unnecessary detail for emails that don't matter
 
 For ALL emails:
+- Focus on the CORE REQUEST — what does the sender actually want?
+- Ignore appended/forwarded noise entirely — do not mention it in your output
 - Each action must be clear, specific, and actionable — NOT raw email text
 - Include due dates where mentioned or implied
 - The reader should fully understand the email and what to do WITHOUT reading the original
