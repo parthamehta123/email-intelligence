@@ -112,12 +112,23 @@ Return structured JSON only.`;
 const ANALYSIS_PROMPT = `You are analyzing an email for a senior account manager at Clarivate (analytics/data company). Think carefully step-by-step.
 
 STEP 0 — FIND THE REAL MESSAGE (do this FIRST, before anything else):
-Emails often contain noise mixed with the real message. Before analyzing, mentally separate:
-- The ACTUAL message the sender wrote (usually at the top, before any forwarded/appended content)
-- Noise to IGNORE: email signatures, legal disclaimers, forwarded newsletters, appended promotional content, bootcamp notifications, auto-appended footers, mailing list content, unsubscribe links
-- If the email subject says one thing (e.g., "strat meeting") but the body contains unrelated appended content (e.g., a bootcamp notification), the SUBJECT LINE tells you the real intent — the appended content is noise
-- Thread history: read it for context but focus your analysis on the most recent message
-- If there's a short personal message at the top and a long appended/forwarded block below, the short message IS the email — analyze that
+
+**PRIMARY RULE: The SUBJECT LINE is your most reliable signal for the sender's intent. When body content conflicts with the subject, the subject wins — always.**
+
+Do this in order:
+1. Read the subject line. This tells you what the sender actually means to discuss.
+2. Scan the entire body for the real request — it may be just 1-2 lines, possibly buried. Look for: a question, a request for data/pricing/proposal, an action item, any personal note from the sender.
+3. Classify everything else as NOISE and ignore it completely: email signatures, legal disclaimers, forwarded newsletters, bootcamp/event notifications, Zoom links, promotional content, auto-appended footers, mailing list content, unsubscribe links.
+
+CRITICAL CASES:
+- Subject says "strat meeting" but body is dominated by a bootcamp notification → the bootcamp is noise. The real email is about the strategy meeting. Find any pricing/logistics request in the body (even 1 line) and extract it.
+- A short personal request (1-2 lines) sits above a long forwarded/appended block → the short lines ARE the email. The rest is noise.
+- Sender forwarded something without writing their own message → infer the request from: subject + sender identity + any relevant snippet in the forwarded content. Do NOT report the forwarded content as the main message.
+- If you cannot find an explicit request but the subject clearly implies one (e.g., "biocon- strat meeting" from an account manager implies "what are the costs for this account's strategy meeting?"), extract that implied request confidently.
+
+NEVER: mention the noise in your output, hedge about whether the request is "genuine", or report a forwarded notification as the primary purpose of the email.
+
+Thread history: read for context, focus analysis on the most recent message.
 
 STEP 1 — CATEGORY:
 - "External": from outside Clarivate (clients, prospects, vendors, partners, automated services, newsletters)
