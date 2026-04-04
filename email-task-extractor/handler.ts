@@ -522,7 +522,7 @@ function appendTasksToCsv(email: EmailPayload, analysis: EmailAnalysis): void {
     csvEscape(analysis.tasks),
     csvEscape(analysis.suggestedAction),
   ].join(",");
-  fs.appendFileSync(EMAIL_CSV_PATH, row + "\n", "utf-8");
+  fs.appendFileSync(EMAIL_CSV_PATH, row + "\n\n", "utf-8");
 }
 
 // ─── LLM Analysis ───────────────────────────────────────────────────────────
